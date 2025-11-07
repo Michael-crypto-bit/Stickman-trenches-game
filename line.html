@@ -1,0 +1,1213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stickline Warfare: Trench Doodles</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap" rel="stylesheet">
+    <style>
+        /* Custom CSS for the blueprint/doodle aesthetic */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f0f0; /* Light grey paper background */
+        }
+        .game-container {
+            /* Ensure the container is relative for the absolute positioning of the message box */
+            position: relative;
+        }
+        #gameCanvas {
+            background-color: #e0e0e0; /* Slightly darker canvas */
+            border: 2px solid #333;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+            cursor: default; /* Default cursor */
+            z-index: 10;
+        }
+        .btn-game {
+            transition: all 0.1s;
+            cursor: pointer;
+            @apply rounded-md text-sm font-semibold shadow-md border-b-2 border-r-2;
+        }
+        .btn-unit {
+            @apply bg-white border-gray-400 text-gray-800 hover:bg-gray-100 active:bg-gray-200 disabled:opacity-50;
+        }
+        .btn-ability {
+            @apply bg-indigo-600 border-indigo-800 text-white hover:bg-indigo-700 active:bg-indigo-800 disabled:opacity-50;
+        }
+        .ring-yellow-300 {
+            box-shadow: 0 0 0 4px rgba(253, 230, 138, 0.5); /* Custom ring for selected unit */
+        }
+        
+        /* Custom styles for the mobile layout */
+        @media (max-width: 768px) {
+            .game-container {
+                flex-direction: column;
+                padding: 10px;
+            }
+            .controls {
+                width: 100%;
+                order: 2; /* Move controls below the canvas */
+                margin-top: 1rem;
+            }
+            #gameCanvas {
+                width: 100%;
+                height: 300px; /* Smaller height on mobile */
+                order: 1;
+            }
+            .unit-grid {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8 min-h-screen flex items-center justify-center">
+
+    <div class="max-w-4xl w-full game-container flex flex-col items-center relative">
+        <h1 class="text-3xl font-bold mb-4 text-gray-800 tracking-tight">Stickline Warfare: Trench Doodles</h1>
+
+        <!-- Ink and HP Display -->
+        <div class="w-full bg-white p-3 mb-4 rounded-xl shadow-lg flex justify-between items-center text-gray-800 border-2 border-gray-300 z-20">
+            <div class="text-lg font-bold">Ink: <span id="inkDisplay" class="text-indigo-600">1000</span></div>
+            <div class="text-lg font-bold">
+                Bunker HP: <span id="playerHPDisplay" class="text-green-600">1000</span>
+                |
+                Enemy HP: <span id="enemyHPDisplay" class="text-red-600">1000</span>
+            </div>
+        </div>
+
+        <!-- Game Canvas (z-index 10) -->
+        <canvas id="gameCanvas" width="800" height="450" class="rounded-lg"></canvas>
+        
+        <!-- Game Over/Deployment Message Box Overlay (z-index 50) -->
+        <div id="messageBox" class="absolute hidden" role="alert" style="z-index: 50;"></div>
+
+        <!-- Controls (Unit and Abilities) -->
+        <div class="w-full controls mt-6">
+            <div class="unit-grid grid grid-cols-6 gap-4">
+                <!-- Unit Buttons will be inserted here by JS -->
+            </div>
+
+            <div class="flex space-x-4 mt-4">
+                <button id="artilleryBtn" class="btn-game btn-ability flex-1 py-3" disabled>
+                    Artillery Strike (<span id="artilleryCost">75</span> Ink)
+                </button>
+                <button id="rallyBtn" class="btn-game btn-ability flex-1 py-3" disabled>
+                    Rally Boost (<span id="rallyCost">50</span> Ink)
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global Constants
+        const CANVAS_WIDTH = 800;
+        const CANVAS_HEIGHT = 450;
+        const BASE_INK_RATE = 2; // Ink per second
+        const BASE_HP = 1000;
+        const LANE_Y = [
+            CANVAS_HEIGHT * 0.25,
+            CANVAS_HEIGHT * 0.50,
+            CANVAS_HEIGHT * 0.75
+        ];
+        
+        // --- DIFFICULTY SETTING ---
+        const ENEMY_HP_MULTIPLIER = 1.0; 
+
+        // UI Elements
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const inkDisplay = document.getElementById('inkDisplay');
+        const playerHPDisplay = document.getElementById('playerHPDisplay');
+        const enemyHPDisplay = document.getElementById('enemyHPDisplay');
+        const unitGrid = document.querySelector('.unit-grid');
+        const artilleryBtn = document.getElementById('artilleryBtn');
+        const rallyBtn = document.getElementById('rallyBtn');
+        const messageBox = document.getElementById('messageBox');
+
+        // Game State
+        let gameState = {
+            ink: 1000, 
+            inkRate: BASE_INK_RATE,
+            lastTime: performance.now(),
+            units: [],
+            barriers: [], 
+            activeStrikes: [], 
+            playerBunkerHP: BASE_HP,
+            enemyBunkerHP: BASE_HP,
+            gameOver: false,
+            enemyInk: 1000, 
+            enemyInkRate: BASE_INK_RATE,
+            enemyLastDeployment: performance.now(),
+
+            // Deployment State for user lane selection
+            unitPendingDeployment: null, 
+            artilleryPendingTarget: false, // NEW: Artillery targeting state
+
+            // Abilities
+            artilleryCooldown: 0,
+            artilleryMaxCooldown: 60, // seconds
+            artilleryCost: 75,
+            rallyCooldown: 0,
+            rallyMaxCooldown: 45, // seconds
+            rallyCost: 50,
+            rallyActiveDuration: 5, // seconds
+            rallyTimer: 0
+        };
+
+        // --- CORE DATA: Unit Definitions ---
+        const UNIT_STATS = {
+            // Recruit speed increased from 1.5 to 1.575 (5% faster)
+            Recruit: { cost: 10, hp: 80, dmg: 6, speed: 1.575 * 10, range: 10, color: 'black', role: 'cannon fodder' },
+            Rifleman: { cost: 35, hp: 100, dmg: 15, speed: 1.0 * 10, range: 80, color: 'black', role: 'backbone' },
+            Sentry: { cost: 60, hp: 60, dmg: 20, speed: 0.8 * 10, range: 120, color: 'black', role: 'sniper' },
+            Heavy: { cost: 120, hp: 300, dmg: 10, speed: 0.6 * 10, range: 10, color: 'black', role: 'tank' },
+            Sapper: { cost: 40, hp: 40, dmg: 1, speed: 1.2 * 10, range: 10, color: 'black', role: 'barrier' },
+            Ninja: { cost: 250, hp: 250, dmg: 40, speed: 1.8 * 10, range: 10, color: 'black', role: 'assassin' } 
+        };
+
+        // --- Unit Class ---
+        class Unit {
+            constructor(type, lane, faction) {
+                const stats = UNIT_STATS[type];
+                
+                // HP Multiplier for enemies (now reverted to 1.0)
+                const hpMultiplier = faction === 'enemy' ? ENEMY_HP_MULTIPLIER : 1.0; 
+
+                this.type = type;
+                this.lane = lane;
+                this.faction = faction; // 'player' or 'enemy'
+                this.maxHp = stats.hp * hpMultiplier; // Applied multiplier
+                this.hp = stats.hp * hpMultiplier;    // Applied multiplier
+                this.damage = stats.dmg;
+                this.speed = stats.speed;
+                this.range = stats.range;
+                this.attackCooldown = 1; // 1 second
+                this.lastAttack = 0;
+                this.size = type === 'Heavy' ? 10 : 7; // Larger heavy unit
+                this.isMoving = true;
+                this.rallyMultiplier = 1; // For Rally ability
+
+                // Animation State
+                this.animationTime = Math.random() * 100; // Staggered start time
+                
+                // Initial position: Adjusted to start at the edge of the trench line
+                this.x = (faction === 'player') ? CANVAS_WIDTH * 0.15 : CANVAS_WIDTH * 0.85;
+                this.y = LANE_Y[lane];
+                this.target = null;
+                
+                // Ninja Bypass Logic
+                if (type === 'Ninja') {
+                    this.maxBypasses = 3; // Can bypass up to 3 units
+                    // NEW: Jump properties for Ninja
+                    this.isJumping = false;
+                    this.jumpTimer = 0;
+                    this.jumpDuration = 0.6; // seconds
+                    this.maxJumpHeight = 40; // pixels
+                    this.lastJumpCheck = performance.now();
+                } else {
+                    this.maxBypasses = 0;
+                }
+            }
+
+            // Simple stickman drawing with unique features and animation
+            draw() {
+                ctx.save();
+                
+                // Calculate jump offset for Ninja
+                let jumpOffset = 0;
+                if (this.isJumping && this.type === 'Ninja') {
+                    // Jump progress goes from 1 (start of jump) down to 0 (end of jump)
+                    const progress = this.jumpTimer / this.jumpDuration; 
+                    // Use a sine wave (0 to 1 back to 0) for a smooth arc
+                    const jumpProgress = Math.sin(Math.PI * (1 - progress)); 
+                    jumpOffset = -this.maxJumpHeight * jumpProgress; 
+                }
+
+                // Set initial drawing properties
+                ctx.fillStyle = this.faction === 'player' ? 'black' : 'red';
+                ctx.strokeStyle = this.faction === 'player' ? 'black' : 'red';
+                ctx.lineWidth = 2; 
+
+                // --- Animation Logic ---
+                let legAngle = 0;
+                let armAngle = 0;
+                if (this.isMoving) {
+                    // Use a faster swing if moving (10 rad/s)
+                    const swingSpeed = 10;
+                    legAngle = Math.sin(this.animationTime * swingSpeed) * 0.3; // Swing up to ~17 degrees
+                    armAngle = Math.sin(this.animationTime * swingSpeed + Math.PI) * 0.2; // Opposite arm swing
+                }
+
+                // Define stick figure pivot points - APPLY JUMP OFFSET HERE
+                const xBase = this.x; 
+                const headY = this.y - this.size * 2.5 + jumpOffset; 
+                const bodyY = this.y - this.size * 1.5 + jumpOffset; 
+                const waistY = this.y - this.size * 0.5 + jumpOffset; 
+                
+                // The feet should land on the LANE_Y when not jumping, but we draw from the waist down
+                // The jump offset makes the whole unit shift up.
+
+                // 1. Head (Circle)
+                ctx.beginPath();
+                ctx.arc(xBase, headY, this.size * 0.7, 0, Math.PI * 2);
+                ctx.fill();
+
+                // 2. Body (Line from head to waist)
+                ctx.beginPath();
+                ctx.moveTo(xBase, headY + this.size * 0.7);
+                ctx.lineTo(xBase, waistY);
+                ctx.stroke();
+
+                // 3. Legs (Animated)
+                const legLength = this.size * 2;
+                // Leg 1
+                ctx.beginPath();
+                ctx.moveTo(xBase, waistY);
+                ctx.lineTo(xBase + Math.sin(legAngle) * this.size, waistY + Math.cos(legAngle) * legLength);
+                ctx.stroke();
+                // Leg 2 (out of phase)
+                ctx.beginPath();
+                ctx.moveTo(xBase, waistY);
+                ctx.lineTo(xBase + Math.sin(-legAngle) * this.size, waistY + Math.cos(-legAngle) * legLength);
+                ctx.stroke();
+
+                // 4. Arms (Animated)
+                const armLength = this.size * 1.5;
+                // Arm 1
+                ctx.beginPath();
+                ctx.moveTo(xBase, bodyY);
+                ctx.lineTo(xBase + armLength * Math.sin(armAngle), bodyY + armLength * Math.cos(armAngle));
+                ctx.stroke();
+                // Arm 2
+                ctx.beginPath();
+                ctx.moveTo(xBase, bodyY);
+                ctx.lineTo(xBase + armLength * Math.sin(-armAngle), bodyY + armLength * Math.cos(-armAngle));
+                ctx.stroke();
+                
+                // --- Unique Designs based on Type ---
+                ctx.strokeStyle = this.faction === 'player' ? 'black' : 'red';
+                ctx.fillStyle = this.faction === 'player' ? 'black' : 'red';
+
+                switch (this.type) {
+                    case 'Rifleman':
+                        // Draw a rifle
+                        const rifleX = this.x + (this.faction === 'player' ? -1 : 1) * 5;
+                        const rifleLength = 30;
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.moveTo(rifleX, bodyY);
+                        ctx.lineTo(rifleX + (this.faction === 'player' ? -1 : 1) * rifleLength, bodyY);
+                        ctx.stroke();
+                        ctx.lineWidth = 2; 
+                        break;
+
+                    case 'Sentry':
+                        // Draw a helmet/cap (triangle)
+                        const hatY = headY - this.size * 0.7;
+                        ctx.beginPath();
+                        ctx.moveTo(xBase - this.size * 0.8, hatY);
+                        ctx.lineTo(xBase + this.size * 0.8, hatY);
+                        ctx.lineTo(xBase, hatY - this.size * 0.5);
+                        ctx.closePath();
+                        ctx.fill();
+                        
+                        // Draw a scope/goggle
+                        ctx.fillStyle = 'white';
+                        ctx.beginPath();
+                        ctx.arc(xBase + this.size * 0.3, headY - this.size * 0.3, 1.5, 0, Math.PI * 2);
+                        ctx.fill();
+                        break;
+                        
+                    case 'Sapper':
+                        // Draw a backpack (small square on back)
+                        const packWidth = this.size * 1.5;
+                        const packX = this.x + (this.faction === 'player' ? -this.size * 2 : this.size * 0.5);
+                        ctx.fillStyle = '#6b7280'; // Gray backpack
+                        ctx.fillRect(packX, bodyY - 5, packWidth, 10);
+                        break;
+                        
+                    case 'Heavy':
+                        // Already larger size=10, draw a thick 'vest'
+                        ctx.lineWidth = 5;
+                        ctx.beginPath();
+                        ctx.moveTo(xBase, bodyY);
+                        ctx.lineTo(xBase, waistY);
+                        ctx.stroke();
+                        ctx.lineWidth = 2; // Reset line width
+                        break;
+                    case 'Recruit':
+                        // Default design (no extra features)
+                        break;
+                    case 'Ninja':
+                        // Draw a mask (line across the mouth/nose area)
+                        ctx.lineWidth = 3;
+                        ctx.beginPath();
+                        ctx.moveTo(xBase - this.size * 0.7, headY);
+                        ctx.lineTo(xBase + this.size * 0.7, headY);
+                        ctx.stroke();
+                        ctx.lineWidth = 2; // Reset
+                        
+                        // Small sword on the back (diagonal line)
+                        ctx.strokeStyle = '#4b5563'; // Darker gray
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.moveTo(xBase, bodyY);
+                        ctx.lineTo(xBase + (this.faction === 'player' ? -15 : 15), bodyY + 15);
+                        ctx.stroke();
+                        ctx.lineWidth = 2; // Reset
+                        break;
+                }
+
+                // HP Bar (Above head) - Apply jump offset
+                const hpPercent = this.hp / this.maxHp;
+                ctx.fillStyle = hpPercent > 0.5 ? 'green' : (hpPercent > 0.2 ? 'yellow' : 'red');
+                ctx.fillRect(this.x - 15, headY - 10, 30 * hpPercent, 3);
+                ctx.strokeStyle = 'gray';
+                ctx.strokeRect(this.x - 15, headY - 10, 30, 3);
+
+                ctx.restore();
+            }
+            
+            drawBarrier(x, y, color) {
+                // Barbed Wire/Sandbag effect (Sapper death)
+                ctx.save();
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                
+                // Simple X pattern
+                for(let i = -10; i <= 10; i += 5) {
+                    ctx.moveTo(x + i, y - 5);
+                    ctx.lineTo(x - i, y + 5);
+                }
+                ctx.stroke();
+
+                ctx.fillStyle = 'rgba(120, 80, 50, 0.5)'; // Sandbag color
+                ctx.fillRect(x - 20, y - 10, 40, 20);
+                
+                ctx.restore();
+            }
+
+            update(deltaTime) {
+                // Check for Sapper effect on death (must happen before early return)
+                if (this.hp <= 0 && this.type === 'Sapper') {
+                    // Sapper death logic
+                    const barrierDuration = 10000; 
+                    const barrierX = this.x;
+                    const slowDuration = performance.now() + barrierDuration;
+                    
+                    const existingBarrier = gameState.barriers.find(b => b.lane === this.lane && Math.abs(b.x - barrierX) < 40);
+
+                    if (!existingBarrier) {
+                        const barrierFaction = this.faction === 'player' ? 'enemy' : 'player'; // Barrier slows/damages the OPPOSITE faction
+                        const barrierDPS = 10; 
+                        gameState.barriers.push({ x: barrierX, lane: this.lane, expires: slowDuration, faction: barrierFaction, dps: barrierDPS });
+                    }
+                }
+                
+                if (this.hp <= 0 || gameState.gameOver) return;
+
+                // Update animation timer
+                this.animationTime += deltaTime;
+
+                // Check for nearby enemies (units or bunker)
+                this.target = this.findTarget();
+
+                if (this.target) {
+                    // Check distance to the target's position
+                    // We use absolute distance here, movement direction is handled later
+                    const distance = Math.abs(this.x - this.target.x); 
+                    this.isMoving = distance > this.range;
+
+                    if (!this.isMoving) {
+                        this.attack(deltaTime);
+                    }
+                } else {
+                    this.isMoving = true;
+                }
+
+                if (this.isMoving) {
+                    let currentSpeed = this.speed * this.rallyMultiplier;
+
+                    // NEW: Ninja Jump Logic
+                    if (this.type === 'Ninja') {
+                        const now = performance.now();
+                        
+                        // 1. Decay the jump timer
+                        if (this.isJumping) {
+                            this.jumpTimer = Math.max(0, this.jumpTimer - deltaTime);
+                            if (this.jumpTimer === 0) {
+                                this.isJumping = false;
+                            }
+                        }
+                        
+                        // 2. Trigger a jump if moving near the closest enemy and not already jumping
+                        if (!this.isJumping && now - this.lastJumpCheck > 200) { // Check every 0.2s
+                            const enemiesAhead = gameState.units.filter(u => u.faction !== this.faction && u.lane === this.lane && u.hp > 0);
+                            const direction = this.faction === 'player' ? 1 : -1;
+                            
+                            if (enemiesAhead.length > 0) {
+                                // Find the ABSOLUTE closest enemy ahead
+                                const closestEnemy = enemiesAhead.sort((a, b) => direction * (a.x - b.x))[0];
+                                if (closestEnemy) {
+                                    const distanceToClosest = direction === 1 ? closestEnemy.x - this.x : this.x - closestEnemy.x;
+                                    const triggerDistance = 80; // Start jump 80px away from the closest unit
+                                    
+                                    if (distanceToClosest > 0 && distanceToClosest < triggerDistance) {
+                                        this.isJumping = true;
+                                        this.jumpTimer = this.jumpDuration; // Start jump timer
+                                    }
+                                }
+                            }
+                            this.lastJumpCheck = now;
+                        }
+                    }
+
+                    // Interaction with Sapper Barriers
+                    const barrierInteractions = gameState.barriers.filter(b => 
+                        b.lane === this.lane && 
+                        Math.abs(b.x - this.x) < 40 // Unit is on the barrier zone (40 units radius)
+                    );
+
+                    barrierInteractions.forEach(b => {
+                        // Check if this barrier targets the unit's faction (i.e., this is a hostile barrier)
+                        if (b.faction === this.faction) {
+                            // Apply Slow
+                            currentSpeed *= 0.3; 
+                            
+                            // Apply Damage over time
+                            this.hp -= b.dps * deltaTime;
+                        }
+                    });
+
+                    // Move unit
+                    const direction = this.faction === 'player' ? 1 : -1; 
+                    this.x += currentSpeed * deltaTime * direction; 
+                }
+            }
+
+            findTarget() {
+                const enemies = gameState.units.filter(u => u.faction !== this.faction && u.lane === this.lane && u.hp > 0);
+                const bunker = this.faction === 'player' 
+                    ? { x: CANVAS_WIDTH * 0.9, hp: gameState.enemyBunkerHP, faction: 'enemy', isBunker: true } 
+                    : { x: CANVAS_WIDTH * 0.1, hp: gameState.playerBunkerHP, faction: 'player', isBunker: true };
+
+                let closestTarget = null;
+                let minDistance = Infinity;
+                
+                // Define search direction (Player: 1=right, Enemy: -1=left)
+                const direction = this.faction === 'player' ? 1 : -1;
+
+                // Filter enemies that are actually ahead of the unit
+                const enemiesAhead = enemies.filter(u => direction === 1 ? u.x > this.x : u.x < this.x);
+
+                // --- 1. NINJA LOGIC (Override standard targeting) ---
+                if (this.type === 'Ninja') {
+                    // Sort enemies ahead by distance (closest to the Ninja first)
+                    const sortedEnemiesAhead = enemiesAhead.sort((a, b) => direction * (a.x - b.x)); 
+                    
+                    // The Ninja's target is the unit *after* the bypass count (the 4th unit)
+                    const effectiveTargetIndex = this.maxBypasses; 
+
+                    if (sortedEnemiesAhead.length > effectiveTargetIndex) {
+                        const targetUnit = sortedEnemiesAhead[effectiveTargetIndex];
+                        const distance = direction === 1 ? targetUnit.x - this.x : this.x - targetUnit.x;
+
+                        // Only target if the unit is within attack range
+                        if (distance > -10) { 
+                            closestTarget = targetUnit;
+                            minDistance = distance;
+                        }
+                    } 
+                    // If not enough units to block the ninja, it falls through to the Bunker check (closestTarget remains null)
+                } 
+                
+                // --- 2. REGULAR UNIT LOGIC (If Ninja hasn't set a target, or for all other units) ---
+                if (this.type !== 'Ninja' || closestTarget === null) {
+                    // Find the absolute closest unit that is ahead
+                    for (const enemy of enemiesAhead) {
+                        // Calculate distance (always positive)
+                        const distance = direction === 1 ? enemy.x - this.x : this.x - enemy.x;
+                        if (distance > -10 && distance < minDistance) { 
+                            closestTarget = enemy;
+                            minDistance = distance;
+                        }
+                    }
+                }
+
+                // --- 3. BUNKER LOGIC (Fallback) ---
+                const bunkerDistance = direction === 1 ? bunker.x - this.x : this.x - bunker.x;
+                
+                // If NO UNIT was found (either regular unit or Ninja that bypassed everyone), target the bunker.
+                // The unit will automatically stop at the correct range in the update() loop.
+                if (!closestTarget) {
+                    // Only target if the bunker is still ahead
+                    if (bunkerDistance > -10) {
+                        closestTarget = bunker;
+                    }
+                }
+
+                return closestTarget;
+            }
+
+            attack(deltaTime) {
+                const now = performance.now();
+                if (now - this.lastAttack >= this.attackCooldown * 1000) {
+                    if (this.target.isBunker) {
+                        // Calculate distance to the bunker's attack position (which is its edge minus unit's range)
+                        const attackX = this.faction === 'player' 
+                            ? this.target.x - this.range // Player attacks from the left of enemy bunker
+                            : this.target.x + this.range; // Enemy attacks from the right of player bunker
+                        
+                        // Only attack if the unit is within range of the *bunker's attack line*
+                        // This prevents units from running off-screen (as addressed in the previous turn)
+                        if (Math.abs(this.x - attackX) <= 1) { 
+                            if (this.target.faction === 'enemy') {
+                                gameState.enemyBunkerHP -= this.damage * this.rallyMultiplier;
+                            } else {
+                                gameState.playerBunkerHP -= this.damage * this.rallyMultiplier;
+                            }
+                            this.lastAttack = now;
+                            this.drawProjectile(this.target.x, this.target.y);
+                        }
+                    } else {
+                        this.target.hp -= this.damage * this.rallyMultiplier;
+                        this.lastAttack = now;
+                        this.drawProjectile(this.target.x, this.target.y);
+                    }
+                }
+            }
+            
+            drawProjectile(targetX, targetY) {
+                ctx.save();
+                ctx.fillStyle = 'red';
+                ctx.beginPath();
+                // Projectile originates from unit's chest area
+                ctx.arc(this.x, this.y - this.size * 1.5, 2, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        // --- Drawing Functions ---
+
+        function drawBackground() {
+            // Draw Trenches (solid shaded area)
+            ctx.fillStyle = '#b0b0b0'; // Light gray trench color
+            ctx.fillRect(0, 0, CANVAS_WIDTH * 0.15, CANVAS_HEIGHT); // Player Trench
+            ctx.fillRect(CANVAS_WIDTH * 0.85, 0, CANVAS_WIDTH * 0.15, CANVAS_HEIGHT); // Enemy Trench
+
+            // Draw No Man's Land (dotted line pattern for a blueprint look)
+            ctx.strokeStyle = '#333333';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]);
+            for (let i = 0; i < CANVAS_HEIGHT; i += 15) {
+                ctx.beginPath();
+                ctx.moveTo(CANVAS_WIDTH * 0.15, i);
+                ctx.lineTo(CANVAS_WIDTH * 0.85, i);
+                ctx.stroke();
+            }
+            ctx.setLineDash([]); // Reset line dash
+
+            // Draw Lane markers
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 2;
+            LANE_Y.forEach(y => {
+                ctx.beginPath();
+                ctx.moveTo(CANVAS_WIDTH * 0.15, y);
+                ctx.lineTo(CANVAS_WIDTH * 0.85, y);
+                ctx.stroke();
+            });
+        }
+        
+        function drawDeploymentOverlay() {
+            // Draw a flickering overlay when in unit deployment mode
+            if (gameState.unitPendingDeployment) {
+                ctx.save();
+                const laneHeight = CANVAS_HEIGHT / 3;
+                
+                ctx.globalAlpha = 0.15; // Semi-transparent
+                ctx.fillStyle = '#3b82f6'; // Tailwind blue-500
+                
+                // Draw a colored overlay over the three lanes
+                for (let i = 0; i < 3; i++) {
+                    // Flicker effect for visibility
+                    const flicker = Math.sin(performance.now() / 150) > 0.5 ? 1 : 0;
+                    if (flicker) {
+                        ctx.fillRect(CANVAS_WIDTH * 0.15, i * laneHeight, CANVAS_WIDTH * 0.7, laneHeight);
+                    }
+                }
+                
+                ctx.restore();
+            }
+            
+            // Draw a visual hint when in artillery targeting mode
+            if (gameState.artilleryPendingTarget) {
+                 ctx.save();
+                 ctx.strokeStyle = 'red';
+                 ctx.lineWidth = 2;
+                 ctx.setLineDash([10, 5]);
+                 ctx.strokeRect(CANVAS_WIDTH * 0.15, 0, CANVAS_WIDTH * 0.7, CANVAS_HEIGHT);
+                 ctx.setLineDash([]);
+                 ctx.restore();
+            }
+        }
+
+        function drawBunkers() {
+            // Player Bunker (Left)
+            ctx.fillStyle = '#34d399'; // Green/Friendly
+            ctx.fillRect(0, 0, CANVAS_WIDTH * 0.1, CANVAS_HEIGHT);
+            
+            // Enemy Bunker (Right)
+            ctx.fillStyle = '#ef4444'; // Red/Enemy
+            ctx.fillRect(CANVAS_WIDTH * 0.9, 0, CANVAS_WIDTH * 0.1, CANVAS_HEIGHT);
+            
+            // Draw HP bars for Bunkers
+            drawBunkerHP(CANVAS_WIDTH * 0.05, gameState.playerBunkerHP, BASE_HP, 'PLAYER');
+            drawBunkerHP(CANVAS_WIDTH * 0.95, gameState.enemyBunkerHP, BASE_HP, 'ENEMY');
+        }
+        
+        function drawBunkerHP(x, currentHP, maxHP, label) {
+            const hpPercent = currentHP / maxHP;
+            const barWidth = CANVAS_WIDTH * 0.08;
+            const barHeight = 15;
+            const barY = CANVAS_HEIGHT / 2 - barHeight / 2;
+
+            ctx.save();
+            ctx.font = '12px Inter';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = 'black';
+            ctx.fillText(label, x, barY - 10);
+
+            // Background of HP bar
+            ctx.fillStyle = 'gray';
+            ctx.fillRect(x - barWidth / 2, barY, barWidth, barHeight);
+
+            // Foreground HP
+            ctx.fillStyle = hpPercent > 0.5 ? 'green' : (hpPercent > 0.2 ? 'yellow' : 'red');
+            ctx.fillRect(x - barWidth / 2, barY, barWidth * hpPercent, barHeight);
+
+            // Border
+            ctx.strokeStyle = 'black';
+            ctx.strokeRect(x - barWidth / 2, barY, barWidth, barHeight);
+            ctx.restore();
+        }
+
+        function drawUnits() {
+            // Remove dead units
+            gameState.units = gameState.units.filter(u => u.hp > 0);
+            // Draw living units
+            gameState.units.forEach(unit => unit.draw());
+        }
+
+        function drawAbilities() {
+            // Draw Rally effect (flickering border)
+            if (gameState.rallyTimer > 0) {
+                const flicker = Math.sin(performance.now() / 100) > 0 ? 5 : 2;
+                ctx.strokeStyle = 'gold';
+                ctx.lineWidth = flicker;
+                ctx.strokeRect(CANVAS_WIDTH * 0.15, 0, CANVAS_WIDTH * 0.7, CANVAS_HEIGHT);
+                ctx.lineWidth = 1;
+            }
+
+            // Draw Sapper Barriers
+            gameState.barriers.forEach(barrier => {
+                if (barrier.expires > performance.now()) {
+                    // Barrier faction is the faction being SLOWED/DAMAGED
+                    const barrierColor = barrier.faction === 'player' ? 'rgba(0, 150, 255, 0.2)' : 'rgba(255, 0, 0, 0.2)';
+                    const strokeColor = barrier.faction === 'player' ? 'blue' : 'red';
+                    
+                    ctx.save();
+                    ctx.fillStyle = barrierColor;
+                    ctx.fillRect(barrier.x - 40, LANE_Y[barrier.lane] - 30, 80, 60);
+                    
+                    ctx.strokeStyle = strokeColor;
+                    ctx.lineWidth = 3;
+                    ctx.setLineDash([5, 5]);
+                    ctx.strokeRect(barrier.x - 40, LANE_Y[barrier.lane] - 30, 80, 60);
+                    ctx.setLineDash([]);
+                    ctx.restore();
+                }
+            });
+
+            // Clean up expired barriers
+            gameState.barriers = gameState.barriers.filter(b => b.expires > performance.now());
+        }
+
+        // Function to draw the Artillery impact visual
+        function drawArtillery() {
+            const now = performance.now();
+
+            gameState.activeStrikes.forEach(strike => {
+                const timeElapsed = now - strike.startTime;
+                const duration = strike.endTime - strike.startTime;
+                const progress = timeElapsed / duration; // 0 to 1
+
+                // Rapid expansion and fade out effect
+                // Radius expands from 50% to 100% of the maximum
+                const currentRadius = strike.radius * (0.5 + progress * 0.5); 
+                const alpha = 1.0 - progress; // Fades out
+
+                ctx.save();
+                ctx.globalAlpha = Math.max(0, alpha); 
+
+                // Draw explosion shockwave (Red/Orange outline)
+                ctx.strokeStyle = '#FF4500'; 
+                ctx.lineWidth = 5;
+                ctx.beginPath();
+                ctx.arc(strike.x, strike.y, currentRadius, 0, Math.PI * 2);
+                ctx.stroke();
+
+                // Draw impact center (brief yellow flash)
+                if (progress < 0.2) {
+                    ctx.fillStyle = '#FFA500'; 
+                    ctx.beginPath();
+                    ctx.arc(strike.x, strike.y, currentRadius * 0.4, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                ctx.restore();
+            });
+        }
+        
+        function drawAll() {
+            ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            drawBackground();
+            drawBunkers();
+            drawDeploymentOverlay();
+            drawAbilities();
+            drawArtillery(); 
+            drawUnits();
+        }
+
+        // --- UI Message Handlers ---
+
+        function showMessage(text, className) {
+            // Used for Deployment prompts
+            messageBox.innerHTML = text;
+            messageBox.className = `mt-4 p-4 text-center text-xl font-bold rounded-lg ${className} block absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-full max-w-sm`;
+            messageBox.style.top = '50%';
+        }
+
+        function hideMessage() {
+            messageBox.classList.add('hidden');
+            // Remove the ring from all unit and ability buttons
+            document.querySelectorAll('.btn-game').forEach(b => b.classList.remove('ring-4', 'ring-yellow-300'));
+        }
+
+        // --- Deployment Logic ---
+
+        function startDeployment(unitType, cost) {
+            if (gameState.ink < cost || gameState.gameOver) return;
+            
+            // Cancel any pending artillery strike
+            if (gameState.artilleryPendingTarget) {
+                 gameState.artilleryPendingTarget = false;
+                 artilleryBtn.classList.remove('ring-4', 'ring-yellow-300');
+            }
+
+            // If the same button is clicked twice, cancel deployment
+            if (gameState.unitPendingDeployment === unitType) {
+                gameState.unitPendingDeployment = null;
+                hideMessage();
+                canvas.style.cursor = 'default';
+                return;
+            }
+
+            // Start new deployment sequence
+            gameState.unitPendingDeployment = unitType;
+            showMessage(`Deploying ${unitType}. Click one of the three lanes on the map.`, 'bg-yellow-100 text-yellow-700 shadow-xl');
+            
+            // Set button visual cue and cursor change
+            hideMessage(); // Clear previous button rings, then show new message
+            document.getElementById(`btn-${unitType}`).classList.add('ring-4', 'ring-yellow-300');
+            canvas.style.cursor = 'crosshair';
+        }
+
+        /**
+         * Deploys a unit for either player or enemy.
+         * @param {string} type - The unit type.
+         * @param {string} faction - 'player' or 'enemy'.
+         * @param {number} [lane=-1] - The specific lane index (0, 1, or 2) to deploy to. 
+         * -1 means auto-select (random for enemy if not specified by AI, human lane selection otherwise).
+         */
+        function deployUnit(type, faction, lane = -1) {
+            const stats = UNIT_STATS[type];
+            let inkSource = faction === 'player' ? gameState.ink : gameState.enemyInk;
+
+            let finalLane;
+            if (lane !== -1) {
+                finalLane = lane; // Use the lane determined by human click or AI logic
+            } else {
+                finalLane = Math.floor(Math.random() * 3); // Fallback to random if no lane specified
+            }
+            
+            if (inkSource >= stats.cost) {
+                const newUnit = new Unit(type, finalLane, faction); 
+                gameState.units.push(newUnit);
+                
+                if (faction === 'player') {
+                    gameState.ink -= stats.cost;
+                    gameState.unitPendingDeployment = null; // Deployment successful, clear pending state
+                    hideMessage(); // Hide deployment message and clear button ring
+                    canvas.style.cursor = 'default';
+                } else {
+                    gameState.enemyInk -= stats.cost;
+                }
+            } else if (faction === 'player') {
+                 showMessage("Not enough Ink!", 'bg-red-100 text-red-700 shadow-xl');
+                 gameState.unitPendingDeployment = null;
+                 canvas.style.cursor = 'default';
+            }
+        }
+
+        // --- Game Logic ---
+
+        function updateUI() {
+            inkDisplay.textContent = Math.floor(gameState.ink);
+            playerHPDisplay.textContent = Math.ceil(gameState.playerBunkerHP);
+            enemyHPDisplay.textContent = Math.ceil(gameState.enemyBunkerHP);
+
+            // Update Unit Button states
+            Object.entries(UNIT_STATS).forEach(([type, stats]) => {
+                const btn = document.getElementById(`btn-${type}`);
+                if (btn) {
+                    btn.disabled = gameState.ink < stats.cost || gameState.gameOver || gameState.artilleryPendingTarget;
+                }
+            });
+
+            // Update Ability Button states
+            artilleryBtn.disabled = gameState.ink < gameState.artilleryCost || gameState.artilleryCooldown > 0 || gameState.gameOver || gameState.unitPendingDeployment;
+            rallyBtn.disabled = gameState.ink < gameState.rallyCost || gameState.rallyCooldown > 0 || gameState.rallyTimer > 0 || gameState.gameOver || gameState.unitPendingDeployment || gameState.artilleryPendingTarget;
+            
+            // Display cooldowns
+            artilleryBtn.textContent = gameState.artilleryCooldown > 0 
+                ? `Artillery (${Math.ceil(gameState.artilleryCooldown)}s)` 
+                : `Artillery Strike (${gameState.artilleryCost} Ink)`;
+            
+            rallyBtn.textContent = gameState.rallyCooldown > 0 
+                ? `Rally (${Math.ceil(gameState.rallyCooldown)}s)`
+                : gameState.rallyTimer > 0 
+                    ? `Rally Active (${Math.ceil(gameState.rallyTimer)}s)`
+                    : `Rally Boost (${gameState.rallyCost} Ink)`;
+
+            // Check Game Over
+            if (!gameState.gameOver) {
+                if (gameState.enemyBunkerHP <= 0) {
+                    endGame('Victory!');
+                } else if (gameState.playerBunkerHP <= 0) {
+                    endGame('Defeat!');
+                }
+            }
+        }
+        
+        /**
+         * Enemy AI logic: generates ink and deploys units strategically.
+         */
+        function enemyAI(deltaTime) {
+            gameState.enemyInk += gameState.enemyInkRate * deltaTime;
+            
+            if (gameState.enemyInk < 10) return; // Wait for minimum ink
+
+            const now = performance.now();
+            const deploymentInterval = 667; 
+
+            if (now - gameState.enemyLastDeployment > deploymentInterval) {
+                
+                // --- 1. Threat Assessment (Strategic Lane Selection) ---
+                let mostThreatenedLane = -1;
+                // Threshold: only consider a lane threatened if the player unit is past the center line (X > 400)
+                const THREAT_THRESHOLD_X = CANVAS_WIDTH * 0.5; 
+                let maxThreatX = THREAT_THRESHOLD_X; 
+
+                for (let i = 0; i < 3; i++) {
+                    // Find the player unit in this lane that is furthest to the right (closest to enemy bunker)
+                    const closestUnit = gameState.units
+                        .filter(u => u.faction === 'player' && u.lane === i)
+                        // Sort by X descending (highest X means furthest into enemy territory)
+                        .sort((a, b) => b.x - a.x) 
+                        [0]; // Get the furthest unit
+
+                    if (closestUnit && closestUnit.x > maxThreatX) {
+                        maxThreatX = closestUnit.x;
+                        mostThreatenedLane = i;
+                    }
+                }
+
+                // --- 2. Deployment Decision ---
+                let unitToDeploy = null;
+                let laneToDeploy = mostThreatenedLane !== -1 ? mostThreatenedLane : Math.floor(Math.random() * 3);
+
+                // Defensive priority: If a significant threat exists, send cheap defense
+                if (mostThreatenedLane !== -1 && gameState.enemyInk >= UNIT_STATS.Recruit.cost) {
+                    unitToDeploy = 'Recruit'; 
+                } 
+                // Offensive/Balanced deployment (if less threatened or enough ink for better units)
+                else if (gameState.enemyInk >= UNIT_STATS.Rifleman.cost) {
+                    const rand = Math.random();
+                    if (rand < 0.4) unitToDeploy = 'Rifleman';
+                    else if (rand < 0.6 && gameState.enemyInk >= UNIT_STATS.Sentry.cost) unitToDeploy = 'Sentry';
+                    else if (rand < 0.8 && gameState.enemyInk >= UNIT_STATS.Sapper.cost) unitToDeploy = 'Sapper';
+                    else if (rand < 0.9 && gameState.enemyInk >= UNIT_STATS.Heavy.cost) unitToDeploy = 'Heavy';
+                    // The AI doesn't use the Ninja, to give the player a unique advantage
+                }
+
+                // --- 3. Execute Deployment ---
+                if (unitToDeploy) {
+                    const cost = UNIT_STATS[unitToDeploy].cost;
+                    if (gameState.enemyInk >= cost) {
+                        // Deploy using the strategically determined or random lane
+                        deployUnit(unitToDeploy, 'enemy', laneToDeploy); 
+                    }
+                }
+                
+                gameState.enemyLastDeployment = now;
+            }
+        }
+
+        // NEW: Function to execute the artillery strike at a specific location
+        function executeArtilleryStrike(targetX, targetY) {
+            gameState.ink -= gameState.artilleryCost;
+            gameState.artilleryCooldown = gameState.artilleryMaxCooldown;
+
+            const aoeRadius = 100;
+            const damage = 150;
+            const strikeDuration = 0.5; // Visual duration in seconds
+            const now = performance.now();
+
+            // Create and store the strike object for damage application and drawing
+            gameState.activeStrikes.push({
+                x: targetX,
+                y: targetY, 
+                radius: aoeRadius,
+                damage: damage,
+                startTime: now,
+                endTime: now + strikeDuration * 1000,
+                hasDamaged: false // Ensures damage is only applied once
+            });
+        }
+
+        // Artillery button handler
+        function useArtillery() {
+            if (gameState.ink >= gameState.artilleryCost && gameState.artilleryCooldown <= 0) {
+                 // Cancel any pending unit deployment
+                if (gameState.unitPendingDeployment) {
+                    gameState.unitPendingDeployment = null;
+                    document.getElementById(`btn-${gameState.unitPendingDeployment}`).classList.remove('ring-4', 'ring-yellow-300');
+                }
+                
+                // Enter targeting mode
+                gameState.artilleryPendingTarget = true;
+                showMessage(`Artillery Strike ready. Click on the map to target the center of the blast.`, 'bg-red-100 text-red-700 shadow-xl');
+                canvas.style.cursor = 'crosshair';
+                artilleryBtn.classList.add('ring-4', 'ring-yellow-300');
+            }
+        }
+
+        // Function to handle damage application and cleanup for strikes
+        function updateArtillery() {
+            const now = performance.now();
+            
+            gameState.activeStrikes.forEach(strike => {
+                // Apply damage right at the start time (impact moment)
+                if (!strike.hasDamaged && now >= strike.startTime) {
+                    gameState.units.forEach(unit => {
+                        if (unit.faction === 'enemy') {
+                            // Calculate actual distance from the strike center (strike.x, strike.y)
+                            const distance = Math.sqrt(Math.pow(unit.x - strike.x, 2) + Math.pow(unit.y - strike.y, 2));
+                            
+                            if (distance <= strike.radius) {
+                                // Scale damage: closer to center gets more damage
+                                const proximity = 1 - (distance / strike.radius); 
+                                // Minimum 50% damage, up to 100% damage
+                                const finalDamage = strike.damage * (0.5 + 0.5 * proximity); 
+                                unit.hp -= finalDamage; 
+                            }
+                        }
+                    });
+                    strike.hasDamaged = true; // Mark as done damaging
+                }
+            });
+
+            // Filter out expired strikes
+            gameState.activeStrikes = gameState.activeStrikes.filter(s => s.endTime > now);
+        }
+        
+        function useRally() {
+            if (gameState.ink >= gameState.rallyCost && gameState.rallyCooldown <= 0 && gameState.rallyTimer <= 0) {
+                gameState.ink -= gameState.rallyCost;
+                gameState.rallyCooldown = gameState.rallyMaxCooldown;
+                gameState.rallyTimer = gameState.rallyActiveDuration;
+                
+                // Apply rally boost to all friendly units
+                gameState.units.filter(u => u.faction === 'player').forEach(u => {
+                    u.rallyMultiplier = 1.5; // 50% speed/damage boost
+                });
+            }
+        }
+
+        function updateRally(deltaTime) {
+            if (gameState.rallyTimer > 0) {
+                gameState.rallyTimer -= deltaTime;
+                if (gameState.rallyTimer <= 0) {
+                    gameState.rallyTimer = 0;
+                    // Remove rally boost
+                    gameState.units.filter(u => u.faction === 'player').forEach(u => {
+                        u.rallyMultiplier = 1;
+                    });
+                }
+            }
+        }
+
+        function updateCooldowns(deltaTime) {
+            if (gameState.artilleryCooldown > 0) gameState.artilleryCooldown -= deltaTime;
+            if (gameState.rallyCooldown > 0) gameState.rallyCooldown -= deltaTime;
+        }
+
+        function endGame(result) {
+            gameState.gameOver = true;
+            
+            // Clear any deployment state
+            gameState.unitPendingDeployment = null;
+            gameState.artilleryPendingTarget = false;
+            canvas.style.cursor = 'default';
+            
+            // Clear the canvas and draw the game over overlay
+            drawAll(); // Draw one last frame
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            // Display a large, centered Game Over message in the dedicated message box
+            const isVictory = result === 'Victory!';
+            const messageText = isVictory 
+                ? 'Your doodles have conquered the No Man\'s Land!' 
+                : 'Your bunker has been scribbled out by the enemy!';
+            
+            // Position and style the message box as an absolute overlay
+            messageBox.innerHTML = `
+                <div class="p-8 text-center rounded-xl shadow-2xl backdrop-blur-sm 
+                            ${isVictory ? 'bg-green-600/80 text-white' : 'bg-red-600/80 text-white'}">
+                    <h2 class="text-5xl font-extrabold mb-4">${result}</h2>
+                    <p class="text-xl mb-6">${messageText}</p>
+                    <button onclick="window.location.reload()" 
+                            class="bg-white hover:bg-gray-100 text-gray-900 font-bold py-2 px-4 rounded-full shadow-lg transition transform hover:scale-105">
+                        New Game
+                    </button>
+                </div>
+            `;
+            
+            messageBox.className = `absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-full max-w-sm block`;
+        }
+
+        // --- Canvas Click Handler ---
+        function handleCanvasClick(event) {
+            if (gameState.gameOver) return;
+
+            // Get mouse position relative to the canvas
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = event.clientX - rect.left;
+            const mouseY = event.clientY - rect.top;
+
+            // 1. Handle Unit Deployment
+            if (gameState.unitPendingDeployment) {
+                // Determine which lane was clicked
+                let clickedLane = -1;
+                const laneHeight = CANVAS_HEIGHT / 3;
+
+                if (mouseY < laneHeight) {
+                    clickedLane = 0;
+                } else if (mouseY < laneHeight * 2) {
+                    clickedLane = 1;
+                } else if (mouseY < CANVAS_HEIGHT) {
+                    clickedLane = 2;
+                }
+                
+                // Deploy the unit
+                if (clickedLane !== -1) {
+                    deployUnit(gameState.unitPendingDeployment, 'player', clickedLane);
+                }
+            } 
+            
+            // 2. Handle Artillery Targeting
+            else if (gameState.artilleryPendingTarget) {
+                // Check if the click is within the playable zone (No Man's Land/trenches)
+                if (mouseX >= CANVAS_WIDTH * 0.1 && mouseX <= CANVAS_WIDTH * 0.9) {
+                    executeArtilleryStrike(mouseX, mouseY);
+                    gameState.artilleryPendingTarget = false;
+                    hideMessage();
+                    canvas.style.cursor = 'default';
+                    artilleryBtn.classList.remove('ring-4', 'ring-yellow-300');
+                } else {
+                    // Inform the user to click within the battlefield
+                    showMessage("Target must be on the battlefield!", 'bg-red-100 text-red-700 shadow-xl');
+                    // Reset message after a delay, but stay in targeting mode
+                    setTimeout(() => {
+                         if (gameState.artilleryPendingTarget) {
+                              showMessage(`Artillery Strike ready. Click on the map to target the center of the blast.`, 'bg-red-100 text-red-700 shadow-xl');
+                         }
+                    }, 1500);
+                }
+            }
+        }
+
+        // --- Main Game Loop ---
+        function gameLoop(timestamp) {
+            if (gameState.gameOver) return;
+
+            const now = timestamp / 1000; // Convert to seconds
+            const deltaTime = now - gameState.lastTime;
+            gameState.lastTime = now;
+            
+            // 1. Ink Generation (Player)
+            gameState.ink += gameState.inkRate * deltaTime;
+
+            // 2. Update Units
+            gameState.units.forEach(unit => unit.update(deltaTime));
+
+            // 3. Update Abilities/Cooldowns & Strikes
+            updateCooldowns(deltaTime);
+            updateRally(deltaTime);
+            updateArtillery(); 
+            
+            // 4. Enemy AI
+            enemyAI(deltaTime);
+
+            // 5. Drawing and UI Update
+            drawAll();
+            updateUI();
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // --- Initialization ---
+
+        function init() {
+            // Setup Unit Buttons
+            Object.entries(UNIT_STATS).forEach(([type, stats]) => {
+                const btn = document.createElement('button');
+                btn.id = `btn-${type}`;
+                btn.className = 'btn-game btn-unit py-2 flex flex-col items-center justify-center';
+                btn.innerHTML = `
+                    <span class="text-base">${type}</span>
+                    <span class="text-xs text-indigo-500">${stats.cost} Ink}</span>
+                `;
+                btn.onclick = () => startDeployment(type, stats.cost); 
+                unitGrid.appendChild(btn);
+            });
+
+            // Ability listeners
+            artilleryBtn.onclick = useArtillery;
+            rallyBtn.onclick = useRally;
+            
+            // Canvas listener for lane selection
+            canvas.addEventListener('click', handleCanvasClick);
+
+            // Start the game loop
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Start the application
+        window.onload = init;
+    </script>
+</body>
+</html>
