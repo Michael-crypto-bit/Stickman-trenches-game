@@ -90,8 +90,10 @@
         // Combat
         const BULLET_SPEED = 7;
         const PROJECTILE_DAMAGE = 5;
+        const HEALTH_ENEMY = 10; // Defined earlier
+        const PROJECTILE_DAMAGE_TANK = HEALTH_ENEMY; // Tanks one-shot enemies
         const CHARGE_SPEED = 2.0;
-
+ 
         // --- New Range Definitions ---
         const FIRE_RANGE_STICK = 300;  // Can't hit next trench
         const FIRE_RANGE_ENEMY = 300;  // Can't hit next trench
@@ -109,12 +111,14 @@
         const FIRE_COOLDOWN_TANK = 120;   // 2s
         const FIRE_COOLDOWN_ENEMY = 110;  // ~1.8s
         
+        const ENEMY_CHARGE_WAIT_FRAMES = 600; // 10s wait time before charging
+        
         // Health
         const HEALTH_STICK = 10;
         const HEALTH_MORTAR = 15;
-        const HEALTH_ENEMY = 10;
+        // const HEALTH_ENEMY = 10; // Already defined above
         const HEALTH_TANK = 50;
-
+ 
         // Define animation durations
         const MAX_LIFETIME_VEHICLE_FRAMES = Infinity; // 20 seconds at 60 FPS
         const MAX_LIFETIME_STICK_FRAMES = Infinity;   // 70 seconds at 60 FPS
@@ -246,22 +250,23 @@
                 lastFireFrame: 0,
                 fireRange: FIRE_RANGE_ENEMY,
                 fireCooldown: FIRE_COOLDOWN_ENEMY,
-                color: '#ef4444' // Red
+                color: '#ef4444', // Red
+                is_contesting: false,
+                arrivalFrame: 0,
             });
         }
 
         function addAnimation(type) {
             let startX, speed, width, lifetime, direction = 1, health;
             
-            if (type === 'stick') {
+            if (type === 'stick' || type === 'mortar') { // Combined check
                 startX = -50; // Start off-screen left
                 speed = 1.5;
                 width = 30; // Stick figure width
                 lifetime = MAX_LIFETIME_STICK_FRAMES;
                 
                 // --- Mortar Variant Logic ---
-                const isMortar = Math.random() < 0.3; // 30% chance
-                const unitType = isMortar ? 'mortar' : 'stick';
+                const isMortar = type === 'mortar'; // Check type directly
                 health = isMortar ? HEALTH_MORTAR : HEALTH_STICK;
                 const fireRange = isMortar ? FIRE_RANGE_MORTAR : FIRE_RANGE_STICK;
                 const fireCooldown = isMortar ? FIRE_COOLDOWN_MORTAR : FIRE_COOLDOWN_STICK;
@@ -274,7 +279,7 @@
 
                 animations.push({
                     id: Date.now(),
-                    type: unitType, // 'stick' or 'mortar'
+                    type: type, // 'stick' or 'mortar'
                     x: startX,
                     frame: 0,
                     speed: speed,
@@ -283,6 +288,7 @@
                     lifetime: lifetime,
                     is_in_trench: false,
                     is_charging: false,
+                    is_contesting: false,
                     trenchIndex: startTrenchIndex,
                     target_x: targetXInTrench, 
                     target_y: (outputCanvas.height * 0.1) + (Math.random() * (outputCanvas.height * 0.8)), 
@@ -299,10 +305,10 @@
                 startX = -100;
                 speed = 2.5;
                 width = 60;
-                health = 10; // Jeeps are light
+                health: 10; // Jeeps are light
             } else if (type === 'tank') {
                 startX = -150;
-                speed = 1;
+                speed = 0.5; // Reduced speed
                 width = 120;
                 health = HEALTH_TANK;
             } else {
@@ -375,10 +381,13 @@
             // --- Simplified Recognition Logic ---
             let recognizedType = 'unknown';
 
-            // 1. TALL check: Stick Figure
-            if (height > width * 1.1) { 
+            // 1. TALL checks:
+            if (height > width * 1.8) { // Very tall and thin
                 recognizedType = 'stick';
             } 
+            else if (height > width * 1.1) { // Still tall, but wider (stick + rectangle)
+                recognizedType = 'mortar';
+            }
             // 2. WIDE check: Vehicles
             else if (width > height * 1.1) { 
                 
@@ -875,7 +884,8 @@
                 frame: 0,
                 isEnemy: isEnemy,
                 isMortarShell: false,
-                color: isEnemy ? '#f87171' : '#fde047' // Red-light vs Yellow
+                color: isEnemy ? '#f87171' : '#fde047', // Red-light vs Yellow
+                damage: PROJECTILE_DAMAGE // Default damage
             };
 
             if (shooter.type === 'mortar') {
@@ -898,6 +908,10 @@
                 proj.vy = (dy / dist) * BULLET_SPEED;
                 proj.gravity = 0; // Bullets fly straight
                 proj.lifetime = Math.floor(shooter.fireRange / BULLET_SPEED); // Frames to live
+            }
+
+            if (shooter.type === 'tank') {
+                proj.damage = PROJECTILE_DAMAGE_TANK; // Assign higher tank damage
             }
 
             projectiles.push(proj);
@@ -1016,6 +1030,10 @@
                 if (x >= button.x && x <= button.x + button.w &&
                     y >= button.y && y <= button.y + button.h) {
                     
+                    // --- New Charge Logic: Check destination first ---
+                    const nextTrenchIndex = button.fromTrenchIndex + 1;
+                    const enemiesInNextTrench = animations.some(e => e.type === 'enemy' && (e.is_in_trench || e.is_contesting) && e.trenchIndex === nextTrenchIndex);
+
                     // Find all friendly units in that trench
                     animations.forEach(a => {
                         if ((a.type === 'stick' || a.type === 'mortar') && 
@@ -1027,11 +1045,22 @@
                             a.is_charging = true;
                             a.trenchIndex++; // Move to next trench index
                             
-                            // Set new target X within the *next* trench
+                            // Set new target X based on if the trench is clear
                             const nextTrenchX = outputCanvas.width * TRENCH_X_OFFSETS[a.trenchIndex];
-                            const trenchCenter = nextTrenchX + TRENCH_WIDTH / 2;
-                            const randomXOffset = (Math.random() * (TRENCH_WIDTH - a.width)) - (TRENCH_WIDTH - a.width) / 2;
-                            a.target_x = trenchCenter + randomXOffset;
+                            let targetXInTrench;
+                            
+                            if (enemiesInNextTrench) {
+                                // Target a "staging area" just to the left of the trench
+                                targetXInTrench = nextTrenchX - a.width - 5; // Stand 5px outside
+                                a.is_contesting = true; // Mark as "waiting to assault"
+                            } else {
+                                // Trench is clear, charge inside
+                                const trenchCenter = nextTrenchX + TRENCH_WIDTH / 2;
+                                const randomXOffset = (Math.random() * (TRENCH_WIDTH - a.width)) - (TRENCH_WIDTH - a.width) / 2;
+                                targetXInTrench = trenchCenter + randomXOffset;
+                                a.is_contesting = false; // Not contesting, it's clear
+                            }
+                            a.target_x = targetXInTrench;
                         }
                     });
                 }
@@ -1055,10 +1084,10 @@
 
                 // Check for hits
                 animations.forEach(a => {
+                    // Friendly fire check
+                    const isShooterFriendly = !p.isEnemy;
                     const isTargetFriendly = (a.type === 'stick' || a.type === 'mortar' || a.type === 'tank' || a.type === 'jeep');
-                    
-                    // Check for opposing teams
-                    if (p.isEnemy === isTargetFriendly) return; 
+                    if (isShooterFriendly === isTargetFriendly) return; // Skip hitting teammates
 
                     let hit = false;
                     if (a.type === 'stick' || a.type === 'mortar' || a.type === 'enemy') {
@@ -1079,13 +1108,13 @@
                     }
 
                     if (hit) {
-                        a.health -= PROJECTILE_DAMAGE;
+                        a.health -= p.damage; // Use projectile's damage
                         p.lifetime = 0; // Mark projectile for removal
                     }
                 });
 
-                // Remove projectiles that hit, went off-screen, or timed out
-                if (p.frame > p.lifetime || p.x < -10 || p.x > outputCanvas.width + 10 || p.y > outputCanvas.height) {
+                // Remove projectiles that hit, went off-screen, or hit the ground
+                if (p.frame > p.lifetime || p.x < -10 || p.x > outputCanvas.width + 10 || p.y > GROUND_Y_LEVEL) {
                     projectiles.splice(index, 1);
                 }
             });
@@ -1104,8 +1133,56 @@
                         } else {
                             // Arrived at new trench
                             a.x = targetX;
-                            a.is_in_trench = true;
                             a.is_charging = false;
+
+                            // Check if trench is contested
+                            if (a.type === 'stick' || a.type === 'mortar') {
+                                if (a.is_contesting) {
+                                    // Arrived at staging area
+                                    a.is_in_trench = false;
+                                } else {
+                                    // Arrived in clear trench
+                                    a.is_in_trench = true;
+                                }
+                            } else { // Enemy
+                                const friendliesInTrench = animations.some(f => (f.type === 'stick' || f.type === 'mortar') && f.is_in_trench && f.trenchIndex === a.trenchIndex);
+                                if (friendliesInTrench) {
+                                    a.is_contesting = true;
+                                    a.is_in_trench = true; // Enemy is IN the trench
+                                } else {
+                                    a.is_in_trench = true; // Claimed
+                                    a.arrivalFrame = globalFrameCount;
+                                }
+                            }
+                        }
+                    } else if (a.is_contesting) {
+                        // Check if the trench is clear now
+                        if (a.type === 'stick' || a.type === 'mortar') {
+                            
+                            // This state is "waiting at staging area" (is_in_trench = false)
+                            if (!a.is_in_trench) { 
+                                // We are at the staging area. Check if trench is clear to advance.
+                                const enemiesInTrench = animations.some(e => e.type === 'enemy' && (e.is_in_trench || e.is_contesting) && e.trenchIndex === a.trenchIndex);
+                                if (!enemiesInTrench) {
+                                    // It's clear! Charge in.
+                                    a.is_charging = true; // Start moving again
+                                    a.is_contesting = false; // No longer contesting, we're claiming
+                                    // Set new target *inside* the trench
+                                    const nextTrenchX = outputCanvas.width * TRENCH_X_OFFSETS[a.trenchIndex];
+                                    const trenchCenter = nextTrenchX + TRENCH_WIDTH / 2;
+                                    const randomXOffset = (Math.random() * (TRENCH_WIDTH - a.width)) - (TRENCH_WIDTH - a.width) / 2;
+                                    a.target_x = trenchCenter + randomXOffset;
+                                }
+                            }
+                            
+                        } else { // Enemy
+                             // Enemy is in the trench and contesting.
+                             const friendliesInTrench = animations.some(f => (f.type === 'stick' || f.type === 'mortar') && f.is_in_trench && f.trenchIndex === a.trenchIndex);
+                             if (!friendliesInTrench) {
+                                a.is_contesting = false;
+                                a.is_in_trench = true; // Claimed!
+                                a.arrivalFrame = globalFrameCount;
+                            }
                         }
                     } else if (!a.is_in_trench) {
                         // Move towards initial trench target
@@ -1116,11 +1193,28 @@
                             // Arrived at trench
                             a.x = targetX;
                             a.is_in_trench = true;
+                            if (a.type === 'enemy') {
+                                a.arrivalFrame = globalFrameCount;
+                            }
                         }
                     }
                     
-                    // Firing logic (only if in trench and not charging)
-                    if (a.is_in_trench && (globalFrameCount - a.lastFireFrame > a.fireCooldown)) {
+                    // Enemy charging logic
+                    if (a.type === 'enemy' && a.is_in_trench && a.trenchIndex > 0 && (globalFrameCount - a.arrivalFrame > ENEMY_CHARGE_WAIT_FRAMES)) {
+                        a.is_in_trench = false;
+                        a.is_charging = true;
+                        a.arrivalFrame = 0; // reset
+                        a.trenchIndex--; // Charge left
+                        
+                        // Set new target X within the *next* trench
+                        const nextTrenchX = outputCanvas.width * TRENCH_X_OFFSETS[a.trenchIndex];
+                        const trenchCenter = nextTrenchX + TRENCH_WIDTH / 2;
+                        const randomXOffset = (Math.random() * (TRENCH_WIDTH - a.width)) - (TRENCH_WIDTH - a.width) / 2;
+                        a.target_x = trenchCenter + randomXOffset;
+                    }
+
+                    // Firing logic (only if in trench OR contesting and not charging)
+                    if ((a.is_in_trench || a.is_contesting) && (globalFrameCount - a.lastFireFrame > a.fireCooldown)) {
                         const target = findTarget(a);
                         if (target) {
                             createProjectile(a, target);
