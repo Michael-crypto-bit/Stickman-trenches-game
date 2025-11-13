@@ -1,0 +1,1559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drawing Recognizer</title>
+    
+<script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Use Inter font */
+        html, body {
+            font-family: 'Inter', sans-serif;
+            height: 100%;
+            margin: 0;
+            overflow: hidden; /* Prevent scrolling */
+        }
+        /* Style canvases */
+        canvas {
+            display: block;
+            touch-action: none; /* Prevent page scrolling on touch devices while drawing */
+        }
+        #drawCanvas {
+            background-color: #f3f4f6; /* bg-gray-100 */
+            border-radius: 0.5rem; /* rounded-lg */
+        }
+        #outputCanvas {
+            background-color: #1a361c; /* Dark green/black battlefield */
+            border-radius: 0.5rem; /* rounded-lg */
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white">
+
+    
+<div class="flex flex-col md:flex-row w-screen h-screen p-4 gap-4">
+
+        
+<div class="flex-1 flex flex-col bg-gray-700 p-4 rounded-lg shadow-lg overflow-hidden">
+            <h2 class="text-xl font-bold mb-2 text-center">Input Pane</h2>
+            <p class="text-sm text-gray-300 mb-4 text-center">Draw: Stick Figure, Mortar (stick + box), Tank (w/ turret), or Armour (square).</p>
+            
+<div class="flex-1 w-full" id="draw-container">
+                <canvas id="drawCanvas"></canvas>
+            </div>
+            
+<button id="recognizeBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg shadow-md transition-all duration-200">
+                Recognize Drawing
+            </button>
+        </div>
+
+        
+<div class="flex-1 flex flex-col bg-gray-700 p-4 rounded-lg shadow-lg overflow-hidden">
+            <h2 class="text-xl font-bold mb-2 text-center">Output Pane</h2>
+            <p class="text-sm text-gray-300 mb-4 text-center">Click "Charge" on the battlefield to advance your troops.</p>
+            
+<div class="flex-1 w-full" id="output-container">
+                <canvas id="outputCanvas"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // === Canvas Setup ===
+        const drawCanvas = document.getElementById('drawCanvas');
+        const drawCtx = drawCanvas.getContext('2d');
+        const outputCanvas = document.getElementById('outputCanvas');
+        const outputCtx = outputCanvas.getContext('2d');
+        const recognizeBtn = document.getElementById('recognizeBtn');
+
+        let isDrawing = false;
+        let drawPoints = []; // Store all points for analysis
+        
+        // Array to hold all active, simultaneous animations
+        const animations = [];
+        // Array to hold all projectiles
+        const projectiles = [];
+        // Array to hold charge buttons
+        let chargeButtons = [];
+        
+        // === Game Globals ===
+        let globalFrameCount = 0;
+        let nextEnemySpawnFrame = 0;
+        let globalArmour = 0; // New: Armour bonus
+        let isPaused = false; // For pause menu
+        let PAUSE_BUTTON = {}; // For pause button
+        let RIFLE_FIRE_RANGE = 150; // Will be set dynamically
+
+        // Spawning
+        const MIN_ENEMY_SPAWN_FRAMES = 500; // 8.3s
+        const MAX_ENEMY_SPAWN_FRAMES = 900; // 15 seconds at 60 FPS
+        const ENEMY_MORTAR_SPAWN_CHANCE = 0.25; // 25%
+
+        // Combat
+        const BULLET_SPEED = 7;
+        const PROJECTILE_DAMAGE = 5;
+        const HEALTH_ENEMY = 10; // Defined earlier
+        const PROJECTILE_DAMAGE_TANK = HEALTH_ENEMY; // Tanks one-shot enemies
+        const CHARGE_SPEED = 2.0;
+
+        // --- New Range Definitions ---
+        // const FIRE_RANGE_STICK = 250; // Replaced by RIFLE_FIRE_RANGE
+        const FIRE_RANGE_MORTAR = 600;
+        const FIRE_RANGE_TANK = 700;
+        // const FIRE_RANGE_ENEMY = 250; // Replaced by RIFLE_FIRE_RANGE
+        // ---
+
+        // Cooldowns (in frames)
+        const FIRE_COOLDOWN_STICK = 90;   // 1.5s
+        const FIRE_COOLDOWN_MORTAR = 240; // 4s
+        const FIRE_COOLDOWN_TANK = 120;   // 2s
+        const FIRE_COOLDOWN_ENEMY = 110;  // ~1.8s
+        
+        const ENEMY_CHARGE_WAIT_FRAMES = 600; // 10s wait time before charging
+        
+        // Health
+        const HEALTH_STICK = 10;
+        const HEALTH_MORTAR = 15;
+        // const HEALTH_ENEMY = 10; // Already defined above
+        const HEALTH_ENEMY_MORTAR = 15; // New
+        const HEALTH_TANK = 50;
+ 
+        // Define animation durations
+        const MAX_LIFETIME_VEHICLE_FRAMES = Infinity; // 20 seconds at 60 FPS
+        const MAX_LIFETIME_STICK_FRAMES = Infinity;   // 70 seconds at 60 FPS
+        
+        // Trench configuration
+        const TRENCH_WIDTH = 40; // Reduced from 60
+        // 0: Friendly Start, 1: Middle, 2: Enemy Start
+        const TRENCH_X_OFFSETS = [0.15, 0.45, 0.75]; // Reverted to fit non-scrolling view
+        const STICK_FIGURE_HEIGHT = 40; // Reduced from 80
+        let GROUND_Y_LEVEL; // Will be set in resize
+ 
+        // === Canvas Sizing ===
+        function resizeCanvases() {
+            // Get parent dimensions
+            const drawContainer = document.getElementById('draw-container');
+            const outputContainer = document.getElementById('output-container');
+            
+            // Set drawing canvas size
+            drawCanvas.width = drawContainer.clientWidth;
+            drawCanvas.height = drawContainer.clientHeight;
+            
+            // Set output canvas size
+            outputCanvas.width = outputContainer.clientWidth;
+            outputCanvas.height = outputContainer.clientHeight;
+            
+            // Set Ground Level
+            GROUND_Y_LEVEL = outputCanvas.height - 20; // 20px from bottom
+
+            // Set dynamic rifle range
+            RIFLE_FIRE_RANGE = (TRENCH_X_OFFSETS[1] - TRENCH_X_OFFSETS[0]) * outputCanvas.width - TRENCH_WIDTH - 20; // 20px buffer
+            
+            // Set pause button position
+            PAUSE_BUTTON = { x: outputCanvas.width - 90, y: 10, w: 80, h: 30 };
+
+            // Reset drawing context styles
+            setupDrawContext();
+        }
+
+        function setupDrawContext() {
+            drawCtx.strokeStyle = '#1f2937'; // bg-gray-800
+            drawCtx.lineWidth = 5;
+            drawCtx.lineCap = 'round';
+            drawCtx.lineJoin = 'round';
+        }
+
+        // === Drawing Logic ===
+        
+        function getEventCoords(e) {
+            let x, y;
+            const rect = drawCanvas.getBoundingClientRect();
+            if (e.touches) {
+                // Touch event
+                x = e.touches[0].clientX - rect.left;
+                y = e.touches[0].clientY - rect.top;
+            } else {
+                // Mouse event
+                x = e.clientX - rect.left;
+                y = e.clientY - rect.top;
+            }
+            return [x, y];
+        }
+
+        function startDrawing(e) {
+            e.preventDefault();
+            isDrawing = true;
+            const [x, y] = getEventCoords(e);
+            drawCtx.beginPath();
+            drawCtx.moveTo(x, y);
+            drawPoints.push({ x, y });
+        }
+
+        function draw(e) {
+            if (!isDrawing) return;
+            e.preventDefault();
+            const [x, y] = getEventCoords(e);
+            drawCtx.lineTo(x, y);
+            drawCtx.stroke();
+            drawPoints.push({ x, y });
+        }
+
+        function stopDrawing(e) {
+            if (!isDrawing) return;
+            e.preventDefault();
+            isDrawing = false;
+        }
+
+        // Attach drawing event listeners
+        drawCanvas.addEventListener('mousedown', startDrawing);
+        drawCanvas.addEventListener('mousemove', draw);
+        drawCanvas.addEventListener('mouseup', stopDrawing);
+        drawCanvas.addEventListener('mouseleave', stopDrawing);
+        
+        drawCanvas.addEventListener('touchstart', startDrawing);
+        drawCanvas.addEventListener('touchmove', draw);
+        drawCanvas.addEventListener('touchend', stopDrawing);
+        drawCanvas.addEventListener('touchcancel', stopDrawing);
+
+        // === Recognition & Animation Management ===
+        
+        function clearDrawing() {
+            drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+            drawPoints = [];
+        }
+
+        /**
+         * Spawns a new enemy unit from the right side.
+         */
+        function spawnEnemy() {
+            const startX = outputCanvas.width + 50; // Start off-screen right
+            const speed = -1.5; // Move left
+            const width = 30;
+            const lifetime = MAX_LIFETIME_STICK_FRAMES;
+            
+            // --- New: Randomly select enemy type ---
+            const isMortar = Math.random() < ENEMY_MORTAR_SPAWN_CHANCE;
+            const type = isMortar ? 'enemy_mortar' : 'enemy';
+            const health = isMortar ? HEALTH_ENEMY_MORTAR : HEALTH_ENEMY;
+            const fireRange = isMortar ? FIRE_RANGE_MORTAR : RIFLE_FIRE_RANGE;
+            const fireCooldown = isMortar ? FIRE_COOLDOWN_MORTAR : FIRE_COOLDOWN_ENEMY;
+            // ---
+
+            // Enemies target the LAST trench (index 2)
+            const enemyTrenchIndex = TRENCH_X_OFFSETS.length - 1;
+            const trenchX = outputCanvas.width * TRENCH_X_OFFSETS[enemyTrenchIndex];
+            const trenchCenter = trenchX + TRENCH_WIDTH / 2;
+            const randomXOffset = (Math.random() * (TRENCH_WIDTH - width)) - (TRENCH_WIDTH - width) / 2;
+            const targetXInTrench = trenchCenter + randomXOffset;
+
+            animations.push({
+                id: Date.now(),
+                type: type, // 'enemy' or 'enemy_mortar'
+                x: startX,
+                frame: 0,
+                speed: speed,
+                width: width,
+                direction: -1, // Moving left
+                lifetime: lifetime,
+                is_in_trench: false,
+                is_charging: false,
+                trenchIndex: enemyTrenchIndex,
+                target_x: targetXInTrench, 
+                target_y: 10 + (Math.random() * (outputCanvas.height - 20)), // 10px padding
+                health: health,
+                lastFireFrame: 0,
+                fireRange: fireRange,
+                fireCooldown: fireCooldown,
+                color: '#ef4444', // Red
+                is_contesting: false,
+                arrivalFrame: 0,
+            });
+        }
+
+        function addAnimation(type) {
+            let startX, speed, width, lifetime, direction = 1, health;
+            
+            if (type === 'stick' || type === 'mortar') { // Combined check
+                startX = -50; // Start off-screen left
+                speed = 1.5;
+                width = 30; // Stick figure width
+                lifetime = MAX_LIFETIME_STICK_FRAMES;
+                
+                // --- Mortar Variant Logic ---
+                const isMortar = type === 'mortar'; // Check type directly
+                health = isMortar ? (HEALTH_MORTAR + globalArmour) : (HEALTH_STICK + globalArmour);
+                const fireRange = isMortar ? FIRE_RANGE_MORTAR : RIFLE_FIRE_RANGE;
+                const fireCooldown = isMortar ? FIRE_COOLDOWN_MORTAR : FIRE_COOLDOWN_STICK;
+                
+                // Stick figures target the FIRST trench (index 0)
+                const startTrenchIndex = 0;
+                const trenchX = outputCanvas.width * TRENCH_X_OFFSETS[startTrenchIndex];
+                const trenchCenter = trenchX + TRENCH_WIDTH / 2;
+                const randomXOffset = (Math.random() * (TRENCH_WIDTH - width)) - (TRENCH_WIDTH - width) / 2;
+                const targetXInTrench = trenchCenter + randomXOffset;
+
+                animations.push({
+                    id: Date.now(),
+                    type: type, // 'stick' or 'mortar'
+                    x: startX,
+                    frame: 0,
+                    speed: speed,
+                    width: width,
+                    direction: direction, 
+                    lifetime: lifetime,
+                    is_in_trench: false,
+                    is_charging: false,
+                    is_contesting: false,
+                    trenchIndex: startTrenchIndex,
+                    target_x: targetXInTrench, 
+                    target_y: 10 + (Math.random() * (outputCanvas.height - 20)), // 10px padding
+                    health: health,
+                    lastFireFrame: 0,
+                    fireRange: fireRange,
+                    fireCooldown: fireCooldown,
+                    color: '#ffffff' // White
+                });
+                return;
+            } 
+            
+            // --- Default settings for vehicles ---
+            
+            // Apply armour bonus
+            let baseHealth;
+            if (type === 'jeep') {
+                startX = -100;
+                speed = 2.5;
+                width = 60;
+                baseHealth = 10; // Jeeps are light
+            } else if (type === 'tank') {
+                startX = -150;
+                speed = 0.5; // Reduced speed
+                width = 120;
+                baseHealth = HEALTH_TANK;
+            } else {
+                // This will catch 'car' and 'boat' and prevent them from being added
+                return;
+            }
+            health = baseHealth + globalArmour;
+            lifetime = MAX_LIFETIME_VEHICLE_FRAMES;
+
+            animations.push({
+                id: Date.now(),
+                type: type,
+                x: startX,
+                frame: 0,
+                speed: speed,
+                width: width,
+                direction: direction, 
+                lifetime: lifetime,
+                health: health,
+                lastFireFrame: 0,
+                fireRange: FIRE_RANGE_TANK, // Tanks have long range
+                fireCooldown: FIRE_COOLDOWN_TANK,
+                color: '#ffffff'
+            });
+        }
+        
+        function displayUnknownMessage() {
+            animations.push({
+                type: 'unknown',
+                x: outputCanvas.width / 2,
+                y: outputCanvas.height / 2,
+                text: 'Unknown Drawing', // Custom text
+                frame: 0,
+                lifetime: 120,
+                health: 1 // Needs health to pass filter
+            });
+        }
+
+        /**
+         * Displays the Armour Up message
+         */
+        function displayArmourMessage() {
+            animations.push({
+                type: 'unknown', // Re-use 'unknown' type for text display
+                x: outputCanvas.width / 2,
+                y: outputCanvas.height / 2,
+                text: `Armour Up! (New Troops +${globalArmour} HP)`, // Custom text
+                frame: 0,
+                lifetime: 120,
+                health: 1 
+            });
+        }
+
+        recognizeBtn.addEventListener('click', () => {
+            // Clear any lingering 'unknown' messages
+            const nonUnknown = animations.filter(a => a.type !== 'unknown');
+            animations.length = 0;
+            animations.push(...nonUnknown);
+
+            if (drawPoints.length < 10) {
+                displayUnknownMessage();
+                clearDrawing();
+                return;
+            }
+
+            // Find the bounding box of the drawing
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            drawPoints.forEach(p => {
+                minX = Math.min(minX, p.x);
+                maxX = Math.max(maxX, p.x);
+                minY = Math.min(minY, p.y);
+                maxY = Math.max(maxY, p.y);
+            });
+
+            const width = maxX - minX;
+            const height = maxY - minY;
+            
+            // Handle near-zero height/width for robustness
+            if (height === 0 || width === 0) {
+                 displayUnknownMessage();
+                 clearDrawing();
+                 return;
+            }
+
+            // --- Simplified Recognition Logic ---
+            let recognizedType = 'unknown';
+
+            // 1. TALL checks:
+            if (height > width * 1.8) { // Very tall and thin
+                recognizedType = 'stick';
+            } 
+            else if (height > width * 1.1) { // Still tall, but wider (stick + rectangle)
+                recognizedType = 'mortar';
+            }
+            // 2. WIDE check: Vehicles
+            else if (width > height * 1.1) { 
+                
+                const totalPoints = drawPoints.length;
+                const topThirdY = minY + height / 3;
+                
+                let topPoints = 0;
+                drawPoints.forEach(p => {
+                    if (p.y < topThirdY) {
+                        topPoints++;
+                    }
+                });
+                
+                const topRatio = topPoints / totalPoints;
+                
+                // Heuristics for wide shapes:
+                if (topRatio < 0.07) { 
+                    recognizedType = 'boat'; // Will be ignored by addAnimation
+                } else if (topRatio < 0.25) { 
+                    recognizedType = 'jeep'; 
+                } else if (topRatio < 0.40) { 
+                    recognizedType = 'tank'; 
+                } else {
+                    recognizedType = 'car'; // Will be ignored by addAnimation
+                }
+            } 
+            else if (Math.abs(width - height) < (Math.max(width, height) * 0.25)) { // Squarish shape
+                recognizedType = 'armour';
+            }
+            
+            // Start the animation or display the message
+            if (recognizedType === 'armour') {
+                globalArmour += 5; // Add +5 armour
+                displayArmourMessage();
+            } else if (recognizedType === 'unknown') {
+                displayUnknownMessage();
+            } else {
+                addAnimation(recognizedType);
+            }
+
+            // Clear the drawing canvas
+            clearDrawing();
+        });
+        
+        // === Drawing Helpers ===
+        
+        /**
+         * Draws a health bar above a unit.
+         */
+        function drawHealthBar(ctx, x, y, width, currentHealth, maxHealth, color) {
+            const barWidth = Math.max(30, width * 0.5);
+            const barHeight = 5;
+            const barX = x + (width / 2) - (barWidth / 2);
+            const barY = y - 12; // Position 12px above head center (just above helmet)
+
+            // Draw background (empty health)
+            ctx.fillStyle = '#333';
+            ctx.fillRect(barX, barY, barWidth, barHeight);
+
+            // Calculate percentages
+            const healthPercentage = Math.min(currentHealth / maxHealth, 1.0);
+            let totalHealthPercentage = currentHealth / maxHealth; // Can be > 1
+
+            // Draw total health (armour + health) in blue
+            if (totalHealthPercentage > 1) {
+                ctx.fillStyle = '#3b82f6'; // blue-500
+                ctx.fillRect(barX, barY, barWidth * Math.min(totalHealthPercentage, 2.0), barHeight); // Cap at 2x
+            }
+            
+            // Draw base health on top (green)
+            ctx.fillStyle = color;
+            ctx.fillRect(barX, barY, barWidth * healthPercentage, barHeight);
+        }
+
+        // Shared wheel drawer
+        function drawWheel(x, y, radius, rotation) {
+            outputCtx.save();
+            outputCtx.translate(x, y);
+            outputCtx.rotate(rotation);
+            
+            outputCtx.fillStyle = '#374151'; // gray-700
+            outputCtx.strokeStyle = '#ffffff';
+            outputCtx.lineWidth = 2;
+            
+            outputCtx.beginPath();
+            outputCtx.arc(0, 0, radius, 0, Math.PI * 2);
+            outputCtx.fill();
+            
+            // Spokes
+            for (let i = 0; i < 4; i++) {
+                outputCtx.moveTo(0, 0);
+                outputCtx.lineTo(0, radius - 2);
+                outputCtx.rotate(Math.PI / 2);
+            }
+            outputCtx.stroke();
+            
+            outputCtx.restore();
+        }
+
+        // === Animation Drawing Functions ===
+        // NOTE: 'y' parameter is the base coordinate where the object rests (bottom of feet/wheels)
+
+        function drawRifleStickFigure(animObj, frame) {
+            const { x, target_y: y, color, is_in_trench: isCrouched, is_charging, health } = animObj;
+
+            // Define the crouch shift (how much the figure lowers)
+            const crouchShift = isCrouched ? 15 : 0; 
+            const currentY = y + crouchShift; // Apply vertical shift
+
+            outputCtx.strokeStyle = color;
+            outputCtx.lineWidth = 3;
+
+            // Stop walking if the stick figure is crouched
+            const walkCycle = (isCrouched || is_charging === false) 
+                ? 0 
+                : Math.sin(frame * 0.15) * 15; 
+            
+            const torsoBaseY = currentY + 10; // 20
+            const headCenterY = currentY - 20; // 40
+            const headRadius = 8; // 15
+
+            // --- Draw Health Bar ---
+            drawHealthBar(outputCtx, x - 15, headCenterY, 30, health, HEALTH_STICK, '#22c55e'); // green
+
+            // --- 1. Draw Helmet (Filled Semicircle) ---
+            outputCtx.fillStyle = '#6a6a6a'; // Medium gray
+            outputCtx.beginPath();
+            outputCtx.arc(x, headCenterY, headRadius + 3, Math.PI, 0); 
+            outputCtx.closePath();
+            outputCtx.fill();
+            outputCtx.stroke(); 
+
+            // --- 2. Draw Head and Torso ---
+            outputCtx.beginPath();
+            outputCtx.arc(x, headCenterY, headRadius, 0, Math.PI * 2);
+            outputCtx.moveTo(x, headCenterY + headRadius);
+            outputCtx.lineTo(x, torsoBaseY);
+            outputCtx.stroke(); 
+
+            // --- Draw Goggles if armoured ---
+            if (globalArmour > 0) {
+                outputCtx.strokeStyle = '#333';
+                outputCtx.lineWidth = 1;
+                outputCtx.beginPath();
+                outputCtx.arc(x - 3, headCenterY, headRadius / 3, 0, Math.PI * 2); // Left eye
+                outputCtx.arc(x + 3, headCenterY, headRadius / 3, 0, Math.PI * 2); // Right eye
+                outputCtx.moveTo(x - 1, headCenterY); // Bridge
+                outputCtx.lineTo(x + 1, headCenterY);
+                outputCtx.stroke();
+                outputCtx.lineWidth = 3; // Reset
+            }
+
+            // --- 3. Arms and Optional Gun ---
+            outputCtx.beginPath();
+            outputCtx.moveTo(x, currentY);
+            if (isCrouched) {
+                // Arms tucked close to the body for a crouch
+                outputCtx.lineTo(x + 5, currentY + 5); // 10, 10
+                outputCtx.moveTo(x, currentY);
+                outputCtx.lineTo(x - 5, currentY + 5); // 10, 10
+
+                // --- Simple Gun (Rifle) ---
+                outputCtx.strokeStyle = '#5C4033'; // Brown for rifle
+                outputCtx.lineWidth = 3;
+                outputCtx.moveTo(x + 3, currentY + 3); // 5, 5
+                outputCtx.lineTo(x + 22, currentY + 7); // 45, 15
+                outputCtx.stroke();
+                
+                outputCtx.strokeStyle = color; // Reset line properties
+                outputCtx.lineWidth = 3; 
+                outputCtx.beginPath(); // New path for main figure lines
+
+            } else {
+                // Normal walk cycle arms
+                outputCtx.lineTo(x + 10, currentY - 5 + walkCycle); // 20, 10
+                outputCtx.moveTo(x, currentY);
+                outputCtx.lineTo(x - 10, currentY - 5 - walkCycle); // 20, 10
+            }
+            
+            // --- 4. Legs ---
+            outputCtx.moveTo(x, torsoBaseY);
+            if (isCrouched) {
+                 // Left leg: more forward
+                 outputCtx.lineTo(x + 5, torsoBaseY + 5); // 10, 10
+                 outputCtx.lineTo(x + 7, torsoBaseY + 12); // 15, 25
+                 // Right leg: slightly back/bent differently
+                 outputCtx.moveTo(x, torsoBaseY);
+                 outputCtx.lineTo(x - 3, torsoBaseY + 7); // 5, 15
+                 outputCtx.lineTo(x - 5, torsoBaseY + 10); // 10, 20
+            } else {
+                // Normal walk cycle legs (adjusted to face right while walking)
+                outputCtx.lineTo(x + walkCycle, torsoBaseY + 15); // 30
+                outputCtx.moveTo(x, torsoBaseY);
+                outputCtx.lineTo(x - walkCycle, torsoBaseY + 15); // 30
+            }
+            outputCtx.stroke(); // Final stroke for arms and legs
+        }
+        
+        function drawMortarStickFigure(animObj, frame) {
+            const { x, target_y: y, color, is_in_trench: isCrouched, is_charging, health } = animObj;
+
+            const crouchShift = isCrouched ? 15 : 0; 
+            const currentY = y + crouchShift;
+
+            outputCtx.strokeStyle = color;
+            outputCtx.lineWidth = 3;
+
+            const walkCycle = (isCrouched || is_charging === false) 
+                ? 0 
+                : Math.sin(frame * 0.15) * 15; 
+
+            const torsoBaseY = currentY + 10; // 20
+            const headCenterY = currentY - 20; // 40
+            const headRadius = 8; // 15
+
+            // --- Draw Health Bar ---
+            drawHealthBar(outputCtx, x - 15, headCenterY, 30, health, HEALTH_MORTAR, '#22c55e');
+ 
+            // --- 1. Draw Helmet ---
+            outputCtx.fillStyle = '#6a6a6a';
+            outputCtx.beginPath();
+            outputCtx.arc(x, headCenterY, headRadius + 3, Math.PI, 0); 
+            outputCtx.closePath();
+            outputCtx.fill();
+            outputCtx.stroke(); 
+
+            // --- 2. Head and Torso ---
+            outputCtx.beginPath();
+            outputCtx.arc(x, headCenterY, headRadius, 0, Math.PI * 2);
+            outputCtx.moveTo(x, headCenterY + headRadius);
+            outputCtx.lineTo(x, torsoBaseY);
+            outputCtx.stroke(); 
+
+            // --- Draw Goggles if armoured ---
+            if (globalArmour > 0) {
+                outputCtx.strokeStyle = '#333';
+                outputCtx.lineWidth = 1;
+                outputCtx.beginPath();
+                outputCtx.arc(x - 3, headCenterY, headRadius / 3, 0, Math.PI * 2); // Left eye
+                outputCtx.arc(x + 3, headCenterY, headRadius / 3, 0, Math.PI * 2); // Right eye
+                outputCtx.moveTo(x - 1, headCenterY); // Bridge
+                outputCtx.lineTo(x + 1, headCenterY);
+                outputCtx.stroke();
+                outputCtx.lineWidth = 3; // Reset
+            }
+
+            // --- 3. Arms ---
+            outputCtx.beginPath();
+            outputCtx.moveTo(x, currentY);
+            if (isCrouched) {
+                // Arms operating the mortar
+                outputCtx.lineTo(x + 5, currentY + 7); // 10, 15
+                outputCtx.moveTo(x, currentY);
+                outputCtx.lineTo(x - 7, currentY + 5); // 15, 10
+            } else {
+                // Normal walk cycle arms
+                outputCtx.lineTo(x + 10, currentY - 5 + walkCycle); // 20, 10
+                outputCtx.moveTo(x, currentY);
+                outputCtx.lineTo(x - 10, currentY - 5 - walkCycle); // 20, 10
+            }
+            outputCtx.stroke();
+
+            // --- 4. Legs ---
+            outputCtx.beginPath();
+            outputCtx.moveTo(x, torsoBaseY);
+            if (isCrouched) {
+                 outputCtx.lineTo(x + 5, torsoBaseY + 5); // 10, 10
+                 outputCtx.lineTo(x + 7, torsoBaseY + 12); // 15, 25
+                 outputCtx.moveTo(x, torsoBaseY);
+                 outputCtx.lineTo(x - 3, torsoBaseY + 7); // 5, 15
+                 outputCtx.lineTo(x - 5, torsoBaseY + 10); // 10, 20
+            } else {
+                outputCtx.lineTo(x + walkCycle, torsoBaseY + 15); // 30
+                outputCtx.moveTo(x, torsoBaseY);
+                outputCtx.lineTo(x - walkCycle, torsoBaseY + 15); // 30
+            }
+            outputCtx.stroke();
+            
+            // --- 5. Mortar Tube ---
+            if (isCrouched) {
+                outputCtx.strokeStyle = '#4a4a4a'; // Dark grey
+                outputCtx.lineWidth = 6; // 8
+                outputCtx.beginPath();
+                outputCtx.moveTo(x + 7, currentY + 12); // 15, 25
+                outputCtx.lineTo(x + 17, currentY - 7); // 35, -15
+                outputCtx.stroke();
+                outputCtx.lineWidth = 3; // Reset
+            }
+        }
+
+        function drawEnemyStickFigure(animObj, frame) {
+            const { x, target_y: y, color, is_in_trench: isCrouched, is_charging, health } = animObj;
+            
+            const crouchShift = isCrouched ? 15 : 0; 
+            const currentY = y + crouchShift;
+
+            outputCtx.strokeStyle = color;
+            outputCtx.lineWidth = 3;
+
+            const walkCycle = (isCrouched || is_charging === false) 
+                ? 0 
+                : Math.sin(frame * 0.15) * 15; 
+            
+            const torsoBaseY = currentY + 10; // 20
+            const headCenterY = currentY - 20; // 40
+            const headRadius = 8; // 15
+
+            // --- Draw Health Bar ---
+            drawHealthBar(outputCtx, x - 15, headCenterY, 30, health, HEALTH_ENEMY, '#ef4444'); // red
+ 
+            // --- 1. Draw Helmet (Filled Semicircle) ---
+            outputCtx.fillStyle = '#552222'; // Dark red/gray
+            outputCtx.beginPath();
+            outputCtx.arc(x, headCenterY, headRadius + 3, Math.PI, 0); 
+            outputCtx.closePath();
+            outputCtx.fill();
+            outputCtx.stroke(); 
+
+            // --- 2. Draw Head and Torso ---
+            outputCtx.beginPath();
+            outputCtx.arc(x, headCenterY, headRadius, 0, Math.PI * 2);
+            outputCtx.moveTo(x, headCenterY + headRadius);
+            outputCtx.lineTo(x, torsoBaseY);
+            outputCtx.stroke();
+
+            // --- 3. Arms and Optional Gun (Facing Left) ---
+            outputCtx.beginPath();
+            outputCtx.moveTo(x, currentY);
+            if (isCrouched) {
+                // Arms tucked (facing left)
+                outputCtx.lineTo(x - 5, currentY + 5); // 10, 10
+                outputCtx.moveTo(x, currentY);
+                outputCtx.lineTo(x + 5, currentY + 5); // 10, 10
+
+                // --- Simple Gun (Rifle) ---
+                outputCtx.strokeStyle = '#5C4033'; // Brown for rifle
+                outputCtx.lineWidth = 3;
+                outputCtx.moveTo(x - 3, currentY + 3); // 5, 5
+                outputCtx.lineTo(x - 22, currentY + 7); // 45, 15
+                outputCtx.stroke();
+                
+                outputCtx.strokeStyle = color; // Reset line properties
+                outputCtx.lineWidth = 3; 
+                outputCtx.beginPath(); 
+
+            } else {
+                // Normal walk cycle arms (facing left)
+                outputCtx.lineTo(x - 10, currentY - 5 + walkCycle); // 20, 10
+                outputCtx.moveTo(x, currentY);
+                outputCtx.lineTo(x + 10, currentY - 5 - walkCycle); // 20, 10
+            }
+            
+            // --- 4. Legs ---
+            outputCtx.moveTo(x, torsoBaseY);
+            if (isCrouched) {
+                 // Legs crouched (facing left)
+                 outputCtx.lineTo(x - 5, torsoBaseY + 5); // 10, 10
+                 outputCtx.lineTo(x - 7, torsoBaseY + 12); // 15, 25
+                 outputCtx.moveTo(x, torsoBaseY);
+                 outputCtx.lineTo(x + 3, torsoBaseY + 7); // 5, 15
+                 outputCtx.lineTo(x + 5, torsoBaseY + 10); // 10, 20
+            } else {
+                // Normal walk cycle legs (facing left)
+                outputCtx.lineTo(x - walkCycle, torsoBaseY + 15); // 30
+                outputCtx.moveTo(x, torsoBaseY);
+                outputCtx.lineTo(x + walkCycle, torsoBaseY + 15); // 30
+            }
+            outputCtx.stroke(); 
+        }
+
+        /**
+         * New: Draws an enemy mortar unit
+         */
+        function drawEnemyMortarFigure(animObj, frame) {
+            const { x, target_y: y, color, is_in_trench: isCrouched, is_charging, health } = animObj;
+            
+            const crouchShift = isCrouched ? 15 : 0; 
+            const currentY = y + crouchShift;
+
+            outputCtx.strokeStyle = color;
+            outputCtx.lineWidth = 3;
+
+            const walkCycle = (isCrouched || is_charging === false) 
+                ? 0 
+                : Math.sin(frame * 0.15) * 15; 
+            
+            const torsoBaseY = currentY + 10; // 20
+            const headCenterY = currentY - 20; // 40
+            const headRadius = 8; // 15
+
+            // --- Draw Health Bar ---
+            drawHealthBar(outputCtx, x - 15, headCenterY, 30, health, HEALTH_ENEMY_MORTAR, '#ef4444'); // red
+ 
+            // --- 1. Draw Helmet (Filled Semicircle) ---
+            outputCtx.fillStyle = '#552222'; // Dark red/gray
+            outputCtx.beginPath();
+            outputCtx.arc(x, headCenterY, headRadius + 3, Math.PI, 0); 
+            outputCtx.closePath();
+            outputCtx.fill();
+            outputCtx.stroke(); 
+
+            // --- 2. Draw Head and Torso ---
+            outputCtx.beginPath();
+            outputCtx.arc(x, headCenterY, headRadius, 0, Math.PI * 2);
+            outputCtx.moveTo(x, headCenterY + headRadius);
+            outputCtx.lineTo(x, torsoBaseY);
+            outputCtx.stroke();
+
+            // --- 3. Arms (Facing Left) ---
+            outputCtx.beginPath();
+            outputCtx.moveTo(x, currentY);
+            if (isCrouched) {
+                // Arms operating mortar (facing left)
+                outputCtx.lineTo(x - 5, currentY + 7); 
+                outputCtx.moveTo(x, currentY);
+                outputCtx.lineTo(x + 7, currentY + 5);
+            } else {
+                // Normal walk cycle arms (facing left)
+                outputCtx.lineTo(x - 10, currentY - 5 + walkCycle); // 20, 10
+                outputCtx.moveTo(x, currentY);
+                outputCtx.lineTo(x + 10, currentY - 5 - walkCycle); // 20, 10
+            }
+            outputCtx.stroke();
+            
+            // --- 4. Legs ---
+            outputCtx.moveTo(x, torsoBaseY);
+            if (isCrouched) {
+                 // Legs crouched (facing left)
+                 outputCtx.lineTo(x - 5, torsoBaseY + 5); // 10, 10
+                 outputCtx.lineTo(x - 7, torsoBaseY + 12); // 15, 25
+                 outputCtx.moveTo(x, torsoBaseY);
+                 outputCtx.lineTo(x + 3, torsoBaseY + 7); // 5, 15
+                 outputCtx.lineTo(x + 5, torsoBaseY + 10); // 10, 20
+            } else {
+                // Normal walk cycle legs (facing left)
+                outputCtx.lineTo(x - walkCycle, torsoBaseY + 15); // 30
+                outputCtx.moveTo(x, torsoBaseY);
+                outputCtx.lineTo(x + walkCycle, torsoBaseY + 15); // 30
+            }
+            outputCtx.stroke(); 
+
+            // --- 5. Mortar Tube (Facing Left) ---
+            if (isCrouched) {
+                outputCtx.strokeStyle = '#4a4a4a'; // Dark grey
+                outputCtx.lineWidth = 6;
+                outputCtx.beginPath();
+                outputCtx.moveTo(x - 7, currentY + 12); // Mirrored
+                outputCtx.lineTo(x - 17, currentY - 7); // Mirrored
+                outputCtx.stroke();
+                outputCtx.lineWidth = 3; // Reset
+            }
+        }
+
+
+        function drawJeep(animObj, frame) {
+            const { x, health, width } = animObj;
+            const y = outputCanvas.height * 0.75; // Vehicle Y
+ 
+            outputCtx.fillStyle = '#34d399'; // emerald-400
+            outputCtx.strokeStyle = '#ffffff';
+            outputCtx.lineWidth = 2;
+
+            // --- Draw Health Bar ---
+            drawHealthBar(outputCtx, x, y - 45, width, health, 10, '#22c55e');
+ 
+            // Body
+            outputCtx.beginPath();
+            outputCtx.moveTo(x, y);
+            outputCtx.lineTo(x + 20, y - 2); // hood
+            outputCtx.lineTo(x + 30, y - 40); // windshield support
+            outputCtx.lineTo(x + 50, y - 40);
+            outputCtx.lineTo(x + 60, y - 20); // back
+            outputCtx.lineTo(x + 60, y);
+            outputCtx.closePath();
+            outputCtx.fill();
+            outputCtx.stroke();
+
+            // Grill/Windshield lines
+            outputCtx.beginPath();
+            outputCtx.moveTo(x, y);
+            outputCtx.lineTo(x, y - 20);
+            outputCtx.moveTo(x + 30, y - 40);
+            outputCtx.lineTo(x + 30, y); // Center support
+            outputCtx.stroke();
+
+            // Wheels
+            const wheelRadius = 12;
+            drawWheel(x + 15, y + 5, wheelRadius, frame * 0.1);
+            drawWheel(x + 50, y + 5, wheelRadius, frame * 0.1);
+        }
+
+        function drawTank(animObj, frame) {
+            const { x, health, width } = animObj;
+            const y = outputCanvas.height * 0.75; // Vehicle Y
+ 
+            outputCtx.fillStyle = '#5c5c5c'; // Darker grey for tank body
+            outputCtx.strokeStyle = '#ffffff';
+            outputCtx.lineWidth = 2;
+            
+            const tankWidth = 120;
+            const tankHeight = 50; // Total height from base of treads to top of turret
+            const treadHeight = 20;
+            const bodyHeight = tankHeight - treadHeight;
+            const turretWidth = 50;
+            const turretHeight = 20;
+            const cannonLength = 60;
+            const wheelRadius = 5;
+            const rotationSpeed = frame * 0.2;
+            const radius = 5; // Corner rounding radius for treads
+
+            // --- Draw Health Bar ---
+            drawHealthBar(outputCtx, x, y - bodyHeight - turretHeight, width, health, HEALTH_TANK, '#22c55e');
+ 
+            // Draw Treads (bottom part) - Rounded Rectangle
+            outputCtx.fillStyle = '#5c5c5c'; 
+            outputCtx.beginPath();
+            
+            outputCtx.moveTo(x + radius, y); 
+            outputCtx.lineTo(x + tankWidth - radius, y);
+            outputCtx.arcTo(x + tankWidth, y, x + tankWidth, y + radius, radius);
+            outputCtx.lineTo(x + tankWidth, y + treadHeight - radius);
+            outputCtx.arcTo(x + tankWidth, y + treadHeight, x + tankWidth - radius, y + treadHeight, radius);
+            outputCtx.lineTo(x + radius, y + treadHeight);
+            outputCtx.arcTo(x, y + treadHeight, x, y + treadHeight - radius, radius);
+            outputCtx.lineTo(x, y + radius);
+            outputCtx.arcTo(x, y, x + radius, y, radius);
+            
+            outputCtx.closePath();
+            outputCtx.fill();
+            outputCtx.stroke();
+
+            // Draw Treads (top part, slightly inside)
+            outputCtx.fillStyle = '#4a4a4a'; // Slightly darker for top of treads
+            outputCtx.beginPath();
+            outputCtx.rect(x + 5, y, tankWidth - 10, treadHeight / 2); // Visible top part of treads
+            outputCtx.fill();
+            outputCtx.stroke();
+
+            // Main Body
+            outputCtx.fillStyle = '#7a7a7a'; // Lighter grey for main body
+            outputCtx.beginPath();
+            outputCtx.rect(x + 10, y - bodyHeight, tankWidth - 20, bodyHeight);
+            outputCtx.fill();
+            outputCtx.stroke();
+
+            // Turret Base
+            outputCtx.fillStyle = '#6a6a6a'; // Medium grey for turret
+            outputCtx.beginPath();
+            outputCtx.ellipse(x + (tankWidth / 2), y - bodyHeight - (turretHeight / 2) + 5, turretWidth / 2, turretHeight / 2, 0, 0, Math.PI * 2);
+            outputCtx.fill();
+            outputCtx.stroke();
+
+            // Cannon
+            outputCtx.beginPath();
+            outputCtx.moveTo(x + (tankWidth / 2) + turretWidth / 4, y - bodyHeight - turretHeight / 2 - 5); // From turret front
+            outputCtx.lineTo(x + (tankWidth / 2) + turretWidth / 4 + cannonLength, y - bodyHeight - turretHeight / 2 - 5);
+            outputCtx.lineWidth = 5;
+            outputCtx.stroke();
+            outputCtx.lineWidth = 2; // Reset line width
+
+            // Tread wheels inside (for detail)
+            outputCtx.fillStyle = '#374151'; // gray-700
+            const wheelY = y + treadHeight / 2;
+            drawWheel(x + 15, wheelY, wheelRadius, rotationSpeed);
+            drawWheel(x + 40, wheelY, wheelRadius, rotationSpeed);
+            drawWheel(x + 65, wheelY, wheelRadius, rotationSpeed);
+            drawWheel(x + 90, wheelY, wheelRadius, rotationSpeed);
+            drawWheel(x + 110, wheelY, wheelRadius, rotationSpeed); // Added one more wheel
+        }
+
+        /**
+         * Draws the background trenches
+         */
+        function drawTrenches() {
+            outputCtx.fillStyle = '#5C4033'; // Brown
+            outputCtx.setLineDash([]); // Ensure solid
+            
+            TRENCH_X_OFFSETS.forEach((offsetX, index) => {
+                const trenchX = outputCanvas.width * offsetX;
+                // Draw solid rectangle from top to bottom
+                outputCtx.fillRect(trenchX, 0, TRENCH_WIDTH, outputCanvas.height);
+            });
+        }
+        
+        /**
+         * Creates a projectile from a shooter towards a target.
+         */
+        function createProjectile(shooter, target) {
+            let startX, startY;
+            let targetX = target.x + (target.width / 2); // Target center
+            let targetY = target.target_y ? (target.target_y - STICK_FIGURE_HEIGHT / 2) : (outputCanvas.height * 0.75 - 25); // Target center Y
+
+            const isEnemy = (shooter.type === 'enemy' || shooter.type === 'enemy_mortar');
+            
+            // Set projectile start position
+            if (shooter.type === 'stick') {
+                startX = shooter.x + 22; // Gun tip (crouched)
+                startY = shooter.target_y + 15 + 7; // Crouched gun Y
+            } else if (shooter.type === 'mortar') {
+                startX = shooter.x + 17; // Mortar tube tip
+                startY = shooter.target_y + 15 - 7;
+            } else if (shooter.type === 'enemy') {
+                startX = shooter.x - 22; // Gun tip (facing left)
+                startY = shooter.target_y + 15 + 7; // Crouched gun Y
+            } else if (shooter.type === 'enemy_mortar') {
+                startX = shooter.x - 17; // Mortar tube tip (facing left)
+                startY = shooter.target_y + 15 - 7;
+            } else if (shooter.type === 'tank') {
+                const y = outputCanvas.height * 0.75; // Vehicle Y
+                startX = shooter.x + (120 / 2) + 50 / 4 + 60; // Tip of tank cannon
+                startY = y - 30 - 20 / 2 - 5;
+            } else if (shooter.type === 'jeep') {
+                startX = shooter.x + 30; // Front of jeep
+                startY = (outputCanvas.height * 0.75) - 20; // Mid-point of jeep
+            } else {
+                return; // Unknown shooter
+            }
+
+            const dx = targetX - startX;
+            const dy = targetY - startY;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            
+            let proj = {
+                id: Date.now(),
+                startX: startX,
+                startY: startY,
+                x: startX,
+                y: startY,
+                frame: 0,
+                isEnemy: isEnemy,
+                isMortarShell: false,
+                color: isEnemy ? '#f87171' : '#fde047', // Red-light vs Yellow
+                damage: PROJECTILE_DAMAGE // Default damage
+            };
+
+            if (shooter.type === 'mortar' || shooter.type === 'enemy_mortar') {
+                // Calculate mortar arc
+                const speed = 10.0; // Mortar shell velocity
+                const gravity = 0.2;
+                
+                // Calculate time to target (horizontal)
+                let t = dist / speed; // This is a rough estimate
+                
+                // More accurate ballistic calculation
+                const a = 0.5 * gravity;
+                const b = -speed; // Assuming a 45-degree angle (vx = vy)
+                const c = dy;
+                
+                // We simplify: calculate time based on horizontal distance
+                const t_flight = dist / (speed * 0.707); // Assume 45 deg
+                
+                // Calculate initial vertical velocity to hit target
+                proj.vx = dx / t_flight;
+                proj.vy = (dy - 0.5 * gravity * t_flight * t_flight) / t_flight;
+                
+                // Failsafe for close targets
+                if (isNaN(proj.vy)) {
+                    proj.vx = (dx / dist) * speed * 0.7;
+                    proj.vy = -(speed * 1.5);
+                }
+                
+                proj.gravity = gravity;
+                proj.lifetime = 1000; // Long lifetime, relies on ground hit
+                proj.isMortarShell = true;
+                proj.color = '#ffffff'; // White shell
+            } else {
+                proj.vx = (dx / dist) * BULLET_SPEED;
+                proj.vy = (dy / dist) * BULLET_SPEED;
+                proj.gravity = 0; // Bullets fly straight
+                proj.lifetime = Math.floor(shooter.fireRange / BULLET_SPEED); // Frames to live
+            }
+
+            if (shooter.type === 'tank') {
+                proj.damage = PROJECTILE_DAMAGE_TANK; // Assign higher tank damage
+            }
+
+            projectiles.push(proj);
+        }
+        
+        /**
+         * Finds the closest valid target for a unit.
+         */
+        function findTarget(shooter) {
+            let closestTarget = null;
+            let minDistance = shooter.fireRange;
+            
+            // New: Cleaner team check
+            const isShooterFriendly = (shooter.type === 'stick' || shooter.type === 'mortar' || shooter.type === 'tank' || shooter.type === 'jeep');
+
+            animations.forEach(target => {
+                // Determine if target is friendly
+                const isTargetFriendly = (target.type === 'stick' || target.type === 'mortar' || target.type === 'tank' || target.type === 'jeep');
+                
+                // Skip if same team
+                if (isShooterFriendly === isTargetFriendly) return;
+
+                let targetX, targetY;
+                if (target.type === 'stick' || target.type === 'mortar' || target.type === 'enemy' || target.type === 'enemy_mortar') {
+                    targetX = target.x;
+                    targetY = target.target_y - (STICK_FIGURE_HEIGHT / 2); // Aim for center mass
+                } else {
+                    targetX = target.x + target.width / 2;
+                    targetY = (outputCanvas.height * 0.75) - 25; // Aim for vehicle center
+                }
+
+                const dist = Math.abs(targetX - shooter.x); // Simple X-distance check
+
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    closestTarget = target;
+                }
+            });
+            return closestTarget;
+        }
+
+        /**
+         * Draws the "Charge" buttons for friendly trenches.
+         */
+        function drawChargeButtons() {
+            chargeButtons = []; // Clear old buttons
+            
+            // Find which trenches have friendly troops
+            let friendlyTrenchIndices = new Set();
+            animations.forEach(a => {
+                if ((a.type === 'stick' || a.type === 'mortar') && a.is_in_trench) {
+                    friendlyTrenchIndices.add(a.trenchIndex);
+                }
+            });
+            
+            // Draw a button for each occupied trench (if not the last one)
+            friendlyTrenchIndices.forEach(trenchIndex => {
+                if (trenchIndex >= TRENCH_X_OFFSETS.length - 1) return; // No charging from last trench
+
+                const trenchX = outputCanvas.width * TRENCH_X_OFFSETS[trenchIndex];
+                
+                const buttonW = 80;
+                const buttonH = 30;
+                const buttonX = trenchX + (TRENCH_WIDTH / 2) - (buttonW / 2);
+                const buttonY = outputCanvas.height - buttonH - 5; // 5px from bottom
+
+                // Add to array for click detection
+                chargeButtons.push({
+                    x: buttonX,
+                    y: buttonY,
+                    w: buttonW,
+                    h: buttonH,
+                    fromTrenchIndex: trenchIndex
+                });
+
+                // Draw the button
+                outputCtx.fillStyle = '#1e40af'; // dark blue
+                outputCtx.strokeStyle = '#93c5fd'; // light blue border
+                outputCtx.lineWidth = 2;
+                outputCtx.fillRect(buttonX, buttonY, buttonW, buttonH);
+                outputCtx.strokeRect(buttonX, buttonY, buttonW, buttonH);
+                
+                // Draw text
+                outputCtx.fillStyle = '#ffffff';
+                outputCtx.font = '14px Inter';
+                outputCtx.textAlign = 'center';
+                outputCtx.textBaseline = 'middle';
+                outputCtx.fillText('Charge!', buttonX + buttonW / 2, buttonY + buttonH / 2);
+            });
+        }
+
+        // === Event Listener for Charge Buttons ===
+        outputCanvas.addEventListener('click', (e) => {
+            const rect = outputCanvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            // Check for pause button click
+            if (x >= PAUSE_BUTTON.x && x <= PAUSE_BUTTON.x + PAUSE_BUTTON.w &&
+                y >= PAUSE_BUTTON.y && y <= PAUSE_BUTTON.y + PAUSE_BUTTON.h) {
+                isPaused = !isPaused;
+                return; // Don't process charge buttons if pause was clicked
+            }
+
+            // Check charge buttons (only if not paused)
+            if (isPaused) return;
+
+            chargeButtons.forEach(button => {
+                if (x >= button.x && x <= button.x + button.w &&
+                    y >= button.y && y <= button.y + button.h) {
+                    
+                    // --- New Charge Logic: Check destination first ---
+                    const nextTrenchIndex = button.fromTrenchIndex + 1;
+                    const enemiesInNextTrench = animations.some(e => (e.type === 'enemy' || e.type === 'enemy_mortar') && (e.is_in_trench || e.is_contesting) && e.trenchIndex === nextTrenchIndex);
+
+                    // Find all friendly units in that trench
+                    animations.forEach(a => {
+                        if ((a.type === 'stick' || a.type === 'mortar') && 
+                            a.is_in_trench && 
+                            a.trenchIndex === button.fromTrenchIndex) {
+                            
+                            // Start charging
+                            a.is_in_trench = false;
+                            a.is_charging = true;
+                            a.trenchIndex++; // Move to next trench index
+                            
+                            // Set new target X based on if the trench is clear
+                            const nextTrenchX = outputCanvas.width * TRENCH_X_OFFSETS[a.trenchIndex];
+                            let targetXInTrench;
+                            
+                            if (enemiesInNextTrench) {
+                                // Target a "staging area" just to the left of the trench
+                                targetXInTrench = nextTrenchX - a.width - 5; // Stand 5px outside
+                                a.is_contesting = true; // Mark as "waiting to assault"
+                            } else {
+                                // Trench is clear, charge inside
+                                const trenchCenter = nextTrenchX + TRENCH_WIDTH / 2;
+                                const randomXOffset = (Math.random() * (TRENCH_WIDTH - a.width)) - (TRENCH_WIDTH - a.width) / 2;
+                                targetXInTrench = trenchCenter + randomXOffset;
+                                a.is_contesting = false; // Not contesting, it's clear
+                            }
+                            a.target_x = targetXInTrench;
+                        }
+                    });
+                }
+            });
+        });
+
+        // === Game State Update ===
+        
+        function updateGameState() {
+            globalFrameCount++;
+            
+            // 1. Update and Filter Projectiles
+            projectiles.forEach((p, index) => {
+                p.frame++;
+                
+                if (p.isMortarShell) {
+                    p.vy += p.gravity; // Apply gravity
+                }
+                p.x += p.vx;
+                p.y += p.vy;
+
+                // Check for hits
+                animations.forEach(a => {
+                    // Friendly fire check
+                    const isShooterFriendly = !p.isEnemy;
+                    const isTargetFriendly = (a.type === 'stick' || a.type === 'mortar' || a.type === 'tank' || a.type === 'jeep');
+                    if (isShooterFriendly === isTargetFriendly) return; // Skip hitting teammates
+
+                    let hit = false;
+                    if (a.type === 'stick' || a.type === 'mortar' || a.type === 'enemy' || a.type === 'enemy_mortar') {
+                        // Hitbox for stick figures (center mass)
+                        const unitTop = a.target_y - STICK_FIGURE_HEIGHT;
+                        const unitBottom = a.target_y + 40; // a bit below
+                        if (p.x >= a.x - a.width/2 && p.x <= a.x + a.width/2 &&
+                            p.y >= unitTop && p.y <= unitBottom) {
+                            hit = true;
+                        }
+                    } else {
+                        // Hitbox for vehicles
+                        const vehicleY = outputCanvas.height * 0.75;
+                        if (p.x >= a.x && p.x <= a.x + a.width &&
+                            p.y >= vehicleY - 50 && p.y <= vehicleY + 20) {
+                            hit = true;
+                        }
+                    }
+
+                    if (hit) {
+                        a.health -= p.damage; // Use projectile's damage
+                        p.lifetime = 0; // Mark projectile for removal
+                    }
+                });
+
+                // Remove projectiles that hit, went off-screen, or hit the ground
+                if (p.frame > p.lifetime || p.x < -10 || p.x > outputCanvas.width + 10 || p.y > GROUND_Y_LEVEL) {
+                    projectiles.splice(index, 1);
+                }
+            });
+
+            // 2. Update Animations (Units)
+            animations.forEach((a, index) => {
+                a.frame++;
+                
+                // --- Handle Stick Figures & Enemies ---
+                if (a.type === 'stick' || a.type === 'mortar' || a.type === 'enemy' || a.type === 'enemy_mortar') {
+                    if (a.is_charging) {
+                        // Move towards the target X in the next trench
+                        const targetX = a.target_x;
+                        if (Math.abs(a.x - targetX) > 2.0) {
+                            a.x += a.direction * CHARGE_SPEED; 
+                        } else {
+                            // Arrived at new trench
+                            a.x = targetX;
+                            a.is_charging = false;
+
+                            // Check if trench is contested
+                            if (a.type === 'stick' || a.type === 'mortar') {
+                                if (a.is_contesting) {
+                                    // Arrived at staging area
+                                    a.is_in_trench = false;
+                                } else {
+                                    // Arrived in clear trench
+                                    a.is_in_trench = true;
+                                }
+                            } else { // Enemy
+                                const friendliesInTrench = animations.some(f => (f.type === 'stick' || f.type === 'mortar') && f.is_in_trench && f.trenchIndex === a.trenchIndex);
+                                if (friendliesInTrench) {
+                                    a.is_contesting = true;
+                                    a.is_in_trench = true; // Enemy is IN the trench
+                                } else {
+                                    a.is_in_trench = true; // Claimed
+                                    a.arrivalFrame = globalFrameCount;
+                                }
+                            }
+                        }
+                    } else if (a.is_contesting) {
+                        // Check if the trench is clear now
+                        if (a.type === 'stick' || a.type === 'mortar') {
+                            
+                            // This state is "waiting at staging area" (is_in_trench = false)
+                            if (!a.is_in_trench) { 
+                                // We are at the staging area. Check if trench is clear to advance.
+                                const enemiesInTrench = animations.some(e => (e.type === 'enemy' || e.type === 'enemy_mortar') && (e.is_in_trench || e.is_contesting) && e.trenchIndex === a.trenchIndex);
+                                if (!enemiesInTrench) {
+                                    // It's clear! Charge in.
+                                    a.is_charging = true; // Start moving again
+                                    a.is_contesting = false; // No longer contesting, we're claiming
+                                    // Set new target *inside* the trench
+                                    const nextTrenchX = outputCanvas.width * TRENCH_X_OFFSETS[a.trenchIndex];
+                                    const trenchCenter = nextTrenchX + TRENCH_WIDTH / 2;
+                                    const randomXOffset = (Math.random() * (TRENCH_WIDTH - a.width)) - (TRENCH_WIDTH - a.width) / 2;
+                                    a.target_x = trenchCenter + randomXOffset;
+                                }
+                            }
+                            
+                        } else { // Enemy
+                             // Enemy is in the trench and contesting.
+                             const friendliesInTrench = animations.some(f => (f.type === 'stick' || f.type ==='mortar') && f.is_in_trench && f.trenchIndex === a.trenchIndex);
+                             if (!friendliesInTrench) {
+                                a.is_contesting = false;
+                                a.is_in_trench = true; // Claimed!
+                                a.arrivalFrame = globalFrameCount;
+                            }
+                        }
+                    } else if (!a.is_in_trench) {
+                        // Move towards initial trench target
+                        const targetX = a.target_x;
+                        if (Math.abs(a.x - targetX) > 2.0) {
+                            a.x += a.speed;
+                        } else {
+                            // Arrived at trench
+                            a.x = targetX;
+                            a.is_in_trench = true;
+                            if (a.type === 'enemy' || a.type === 'enemy_mortar') {
+                                a.arrivalFrame = globalFrameCount;
+                            }
+                        }
+                    }
+                    
+                    // Enemy charging logic
+                    if ((a.type === 'enemy' || a.type === 'enemy_mortar') && a.is_in_trench && a.trenchIndex > 0 && (globalFrameCount - a.arrivalFrame > ENEMY_CHARGE_WAIT_FRAMES)) {
+                        a.is_in_trench = false;
+                        a.is_charging = true;
+                        a.arrivalFrame = 0; // reset
+                        a.trenchIndex--; // Charge left
+                        
+                        // Set new target X within the *next* trench
+                        const nextTrenchX = outputCanvas.width * TRENCH_X_OFFSETS[a.trenchIndex];
+                        const trenchCenter = nextTrenchX + TRENCH_WIDTH / 2;
+                        const randomXOffset = (Math.random() * (TRENCH_WIDTH - a.width)) - (TRENCH_WIDTH - a.width) / 2;
+                        a.target_x = trenchCenter + randomXOffset;
+                    }
+
+                    // Firing logic (only if in trench OR contesting and not charging)
+                    if ((a.is_in_trench || a.is_contesting) && (globalFrameCount - a.lastFireFrame > a.fireCooldown)) {
+                        const target = findTarget(a);
+                        if (target) {
+                            createProjectile(a, target);
+                            a.lastFireFrame = globalFrameCount;
+                        }
+                    }
+                }
+                // --- Handle Vehicles ---
+                else if (a.type === 'tank' || a.type === 'jeep') {
+                    a.x += a.speed;
+                    // Firing logic
+                    if (globalFrameCount - a.lastFireFrame > a.fireCooldown) {
+                         const target = findTarget(a);
+                        if (target) {
+                            createProjectile(a, target);
+                            a.lastFireFrame = globalFrameCount;
+                        }
+                    }
+                }
+
+                // Remove dead or timed-out units
+                if (a.health <= 0 || a.frame > a.lifetime) {
+                    animations.splice(index, 1);
+                }
+            });
+
+            // 3. Spawn new enemies
+            if (globalFrameCount > nextEnemySpawnFrame) {
+                spawnEnemy();
+                setNextEnemySpawn();
+            }
+        }
+
+        // === Main Game Loop ===
+        
+        /**
+         * New function to hold all drawing logic, so we can draw state while paused.
+         */
+        function drawGameElements() {
+            // --- Draw Projectiles ---
+            projectiles.forEach(p => {
+                if (p.isMortarShell) {
+                    outputCtx.fillStyle = p.color;
+                    outputCtx.beginPath();
+                    outputCtx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+                    outputCtx.fill();
+                } else {
+                    outputCtx.strokeStyle = p.color;
+                    outputCtx.lineWidth = 2;
+                    outputCtx.beginPath();
+                    outputCtx.moveTo(p.x, p.y);
+                    outputCtx.lineTo(p.x - p.vx * 0.5, p.y - p.vy * 0.5); // Tracer effect
+                    outputCtx.stroke();
+                }
+            });
+
+            // --- Draw Animations (Units) ---
+            animations.forEach(anim => {
+                // Set y-coordinate for vehicles
+                let y = (anim.type === 'jeep' || anim.type === 'tank') 
+                    ? outputCanvas.height * 0.75 
+                    : anim.target_y;
+
+                switch (anim.type) {
+                    case 'stick':
+                        drawRifleStickFigure(anim, anim.frame);
+                        break;
+                    case 'mortar':
+                        drawMortarStickFigure(anim, anim.frame);
+                        break;
+                    case 'enemy':
+                        drawEnemyStickFigure(anim, anim.frame);
+                        break;
+                    case 'enemy_mortar':
+                        drawEnemyMortarFigure(anim, anim.frame);
+                        break;
+                    case 'jeep':
+                        drawJeep(anim, anim.frame);
+                        break;
+                    case 'tank':
+                        drawTank(anim, anim.frame);
+                        break;
+                    case 'unknown':
+                        outputCtx.fillStyle = 'yellow';
+                        outputCtx.font = '24px Inter';
+                        outputCtx.textAlign = 'center';
+                        const text = anim.text || 'Unknown Drawing'; // Use custom text if available
+                        outputCtx.fillText(text, anim.x, anim.y);
+                        break;
+                }
+            });
+
+            // --- Draw UI Elements (On Top) ---
+            drawChargeButtons();
+        }
+        
+        /**
+         * Draws the Pause Button and Pause Overlay
+         */
+        function drawPauseButton() {
+            // Draw the button
+            outputCtx.fillStyle = isPaused ? '#1e40af' : '#555'; // Blue when paused, grey when active
+            outputCtx.strokeStyle = '#93c5fd'; // light blue border
+            outputCtx.lineWidth = 2;
+            outputCtx.fillRect(PAUSE_BUTTON.x, PAUSE_BUTTON.y, PAUSE_BUTTON.w, PAUSE_BUTTON.h);
+            outputCtx.strokeRect(PAUSE_BUTTON.x, PAUSE_BUTTON.y, PAUSE_BUTTON.w, PAUSE_BUTTON.h);
+            
+            // Draw text
+            outputCtx.fillStyle = '#ffffff';
+            outputCtx.font = '14px Inter';
+            outputCtx.textAlign = 'center';
+            outputCtx.textBaseline = 'middle';
+            const text = isPaused ? 'Resume' : 'Pause';
+            outputCtx.fillText(text, PAUSE_BUTTON.x + PAUSE_BUTTON.w / 2, PAUSE_BUTTON.y + PAUSE_BUTTON.h / 2);
+            
+            // Draw Paused Overlay
+            if (isPaused) {
+                outputCtx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+                outputCtx.fillRect(0, 0, outputCanvas.width, outputCanvas.height);
+                
+                outputCtx.fillStyle = 'white';
+                outputCtx.font = '40px Inter';
+                outputCtx.textAlign = 'center';
+                outputCtx.textBaseline = 'middle';
+                outputCtx.fillText('PAUSED', outputCanvas.width / 2, outputCanvas.height / 2);
+            }
+        }
+
+        function animationLoop(timestamp) {
+            // Clear the canvas
+            outputCtx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
+            
+            // --- Draw Background Elements ---
+            drawTrenches();
+            
+            // --- Update Game State (if not paused) ---
+            if (!isPaused) {
+                updateGameState();
+            }
+
+            // --- Draw All Game Elements (Projectiles, Units, Buttons) ---
+            drawGameElements();
+            
+            // --- Draw Pause UI (On top of everything) ---
+            drawPauseButton();
+
+            // Request next frame
+            requestAnimationFrame(animationLoop);
+        }
+
+        function setNextEnemySpawn() {
+            nextEnemySpawnFrame = globalFrameCount + MIN_ENEMY_SPAWN_FRAMES + (Math.random() * (MAX_ENEMY_SPAWN_FRAMES - MIN_ENEMY_SPAWN_FRAMES));
+        }
+
+        // === Initialization ===
+        window.addEventListener('resize', resizeCanvases);
+        
+        // Initial setup
+        resizeCanvases();
+        setNextEnemySpawn();
+        animationLoop(0); // Start the loop
+    </script>
+</body>
+</html>
